@@ -1,0 +1,268 @@
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import webbrowser
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+ROOT = Path(__file__).resolve().parent
+HOME = Path(os.environ.get("FAM_HOME", Path.home() / ".fam")).expanduser()
+PID = HOME / "daemon.pid"
+LOG = HOME / "daemon.log"
+TOKEN = HOME / "token"
+BASE = f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
+
+
+def request(path, method="GET", data=None):
+    body = json.dumps(data).encode() if data is not None else None
+    headers = {"Content-Type": "application/json"}
+    if TOKEN.exists():
+        headers["X-Fam-Token"] = TOKEN.read_text().strip()
+    req = Request(BASE + path, data=body, method=method, headers=headers)
+    with urlopen(req, timeout=30) as response:
+        return json.loads(response.read())
+
+
+def running():
+    if not PID.exists():
+        return None
+    try:
+        pid = int(PID.read_text().strip())
+        os.kill(pid, 0)
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+        if str(Path(__file__).resolve()) not in command or "serve" not in command:
+            PID.unlink(missing_ok=True)
+            return None
+        return pid
+    except (OSError, ValueError):
+        PID.unlink(missing_ok=True)
+        return None
+
+
+def serve():
+    import uvicorn
+
+    from server import api
+
+    uvicorn.run(api, host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), log_level="info")
+
+
+def start():
+    HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    pid = running()
+    if pid:
+        print(f"Skipper is already running (PID {pid}) at {BASE}")
+        return
+    try:
+        health = request("/api/health")
+    except (HTTPError, URLError, TimeoutError):
+        pass
+    else:
+        print(f"Skipper is already running (PID {health['pid']}) at {BASE}")
+        return
+    LOG.touch(mode=0o600, exist_ok=True)
+    LOG.chmod(0o600)
+    with LOG.open("a") as log:
+        log.seek(0, os.SEEK_END)
+        log_offset = log.tell()
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "serve"],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    PID.write_text(str(process.pid))
+    PID.chmod(0o600)
+    for _ in range(60):
+        try:
+            health = request("/api/health")
+        except (HTTPError, URLError, TimeoutError):
+            if process.poll() is not None:
+                if PID.exists() and PID.read_text().strip() == str(process.pid):
+                    PID.unlink()
+                with LOG.open("r") as log:
+                    log.seek(log_offset)
+                    details = log.read().strip()
+                if not details:
+                    details = "The server process exited before the health check succeeded."
+                raise RuntimeError(f"Skipper failed to start:\n{details}\nFull log: {LOG}")
+            time.sleep(0.25)
+            continue
+        if health["pid"] != process.pid:
+            process.terminate()
+            process.wait(timeout=5)
+            PID.unlink(missing_ok=True)
+            raise RuntimeError(f"Port {BASE} is serving another Skipper process.")
+        print(f"Skipper is running at {BASE}")
+        return
+    print(f"Skipper is starting (PID {process.pid}). See {LOG} for details.")
+
+
+def up():
+    start()
+    if not webbrowser.open(BASE):
+        print(f"Open {BASE} in your browser to use Skipper.")
+
+
+def stop():
+    pid = running()
+    if not pid:
+        print("Skipper is not running.")
+        return
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(40):
+        try:
+            health = request("/api/health")
+        except (HTTPError, URLError, TimeoutError):
+            PID.unlink(missing_ok=True)
+            print("Skipper stopped.")
+            return
+        if health.get("pid") != pid:
+            PID.unlink(missing_ok=True)
+            print("Skipper stopped.")
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"Skipper did not stop cleanly; inspect PID {pid} and {LOG}.")
+
+
+def status():
+    try:
+        h = request("/api/health")
+    except (HTTPError, URLError, TimeoutError) as e:
+        print(f"Skipper is not responding: {e}")
+        return
+    print(f"Skipper is running at {BASE}; {h['running_tasks']} active task(s).")
+    for member in h["members"]:
+        availability = f"working on {member['active']} task(s)" if not member["available"] else "available"
+        print(f"- {member['name']}: {availability}; {member['completed_tasks']} completed, {member['confidence']:.0%} average")
+    print(f"Budget: ${h['budget']['spent']:.2f} / ${h['budget']['cap']:.2f}")
+    print("Recent CLI runs:")
+    runs(5)
+
+
+def runs(limit: int = 20) -> None:
+    try:
+        rows = request(f"/api/runs?limit={limit}")
+    except (HTTPError, URLError, TimeoutError) as e:
+        print(f"Skipper is not responding: {e}")
+        return
+    if not rows:
+        print("No CLI runs recorded yet.")
+    for r in rows:
+        hops = " -> ".join([*(f["failed"] for f in r["fallbacks"]), r["cli"]])
+        task = f" task {r['task']}" if r["task"] else ""
+        print(f"{r['id']} {r['status']:11} {hops:18}{task} in {r['cwd']}: {r['prompt'][:80]}")
+
+
+def chat(text):
+    try:
+        result = request("/api/chat", "POST", {"text": text, "repo": os.getcwd()})
+        print(result["reply"])
+    except HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        print(f"Skipper could not complete that request: {detail}", file=sys.stderr)
+        raise SystemExit(1) from e
+    except URLError as e:
+        print(f"Skipper is not running. Start it with: python daemon.py start ({e})", file=sys.stderr)
+        raise SystemExit(1) from e
+
+
+def install_service():
+    unit = Path.home() / ".config/systemd/user/fam.service"
+    unit.parent.mkdir(parents=True, exist_ok=True)
+
+    def quote(value):
+        return '"' + str(value).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def unit_path(value):
+        return str(value).replace("%", "%%").replace("\\", "\\x5c").replace(" ", "\\x20")
+
+    cli_dirs = [
+        str(Path(found).resolve().parent)
+        for name in ("claude", "copilot")
+        if (found := shutil.which(name))
+    ]
+    service_path = os.pathsep.join(dict.fromkeys([*cli_dirs, os.environ.get("PATH", "")]))
+    unit.write_text(
+        "[Unit]\nDescription=Fam Skipper local assistant\nAfter=network.target\n\n"
+        "[Service]\nType=simple\n"
+        f"WorkingDirectory={unit_path(ROOT)}\n"
+        f"ExecStart={quote(sys.executable)} {quote(Path(__file__).resolve())} serve\n"
+        f"Environment={quote('FAM_HOME=' + str(HOME))}\n"
+        f"Environment={quote('PORT=' + os.environ.get('PORT', '8000'))}\n"
+        f"Environment={quote('PATH=' + service_path)}\n"
+        "Restart=on-failure\nRestartSec=3\n"
+        "Environment=PYTHONUNBUFFERED=1\n\n"
+        "[Install]\nWantedBy=default.target\n"
+    )
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "fam.service"], check=True)
+    active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "fam.service"], check=False)
+    if active.returncode:
+        details = subprocess.run(
+            ["systemctl", "--user", "status", "fam.service", "--no-pager"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        raise RuntimeError(
+            "fam.service did not become active:\n"
+            + (details.stdout or details.stderr).strip()
+        )
+    print(f"Installed and started {unit}")
+
+
+def service_status():
+    subprocess.run(["systemctl", "--user", "status", "fam.service", "--no-pager"], check=False)
+
+
+def service_stop():
+    subprocess.run(["systemctl", "--user", "disable", "--now", "fam.service"], check=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Talk to and manage your local Skipper daemon.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("up", "start", "stop", "status", "runs", "serve", "install-service", "service-status", "service-stop"):
+        sub.add_parser(name)
+    ask = sub.add_parser("chat")
+    ask.add_argument("text", nargs="+")
+    sub.add_parser("talk")
+    args = parser.parse_args()
+    if args.command == "talk":
+        print("Talk to Skipper. Type /quit to leave.")
+        while True:
+            try:
+                text = input("You: ").strip()
+            except EOFError:
+                break
+            if text.lower() in {"/quit", "/exit"}:
+                break
+            if text:
+                print("Skipper: ", end="", flush=True)
+                chat(text)
+        return
+    {
+        "up": up,
+        "start": start,
+        "stop": stop,
+        "status": status,
+        "runs": runs,
+        "serve": serve,
+        "install-service": install_service,
+        "service-status": service_status,
+        "service-stop": service_stop,
+    }.get(args.command, lambda: chat(" ".join(args.text)))()
+
+
+if __name__ == "__main__":
+    main()
