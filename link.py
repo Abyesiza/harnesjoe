@@ -36,13 +36,26 @@ def config(sv):
     return None
 
 
+def github_stars(url):
+    """Stars for a GitHub repository URL, or None when unknown (no network, not GitHub, rate limit)."""
+    m = re.match(r"https://github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", url or "")
+    if not m:
+        return None
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/{m.group(1)}/{m.group(2)}", headers={"Accept": "application/vnd.github+json", "User-Agent": "fam"})
+        return int(json.load(urllib.request.urlopen(req, timeout=8)).get("stargazers_count", 0))
+    except Exception:
+        return None
+
+
 def ready(cfg):
     return all(os.environ.get(m) for v in cfg.get("env", {}).values() for m in re.findall(r"\$\{(\w+)\}", v))
 
 
 class Linker(Node):
-    def __init__(s, bus, root, find=registry, auto=False, keep=2, retire=0.3, floor=0.3):
+    def __init__(s, bus, root, find=registry, auto=False, keep=2, retire=0.3, floor=0.3, stars=github_stars, relevance=0.3):
         super().__init__(bus)
+        s.stars, s.relevance = stars, relevance
         s.root, s.find, s.auto, s.keep, s.retire, s.floor = Path(root), find, auto, keep, retire, floor
         s.path, s.used = s.root / "mcp.json", {}
         d = json.loads(s.path.read_text()) if s.path.exists() else {"queue": list(SEEDS)}
@@ -86,11 +99,36 @@ class Linker(Node):
         hits = {sv["name"]: sv for p in pools if not isinstance(p, Exception) for sv in p if config(sv) and sv["name"] not in s.dead and sv["name"] not in s.trusted}
         return sorted(hits.values(), key=lambda sv: -s.score(need, sv["name"], sv.get("description", "")))
 
+    async def vet(s, need, sv):
+        """Facts Joel needs to judge a proposal, and a reason to drop it. Proposals are never installed
+        without an explicit `approve <name>`."""
+        name, desc = sv["name"], sv.get("description", "")
+        repo = (sv.get("repository") or {}).get("url", "") if isinstance(sv.get("repository"), dict) else ""
+        publisher = name.split("/")[0] if "/" in name else "unknown"
+        rel = float(enc(need) @ enc(f"{name} {desc}"))
+        if not repo:
+            return None, "no source repository link"
+        if rel < s.relevance:
+            return None, f"low relevance ({rel:.2f})"
+        stars = await asyncio.to_thread(s.stars, repo)
+        why = f"for “{need}”: relevance {rel:.2f}; publisher {publisher}; source {repo}" + (f"; ★{stars}" if stars is not None else "; stars unknown")
+        return {"cfg": config(sv), "desc": desc, "need": need, "publisher": publisher, "repo": repo, "stars": stars, "relevance": round(rel, 3), "why": why}, ""
+
     async def propose(s, need, hits):
-        for sv in hits[:3]:
-            s.props[sv["name"]] = {"cfg": config(sv), "desc": sv.get("description", ""), "need": need}
+        named = []
+        for sv in hits[:6]:
+            prop, skip = await s.vet(need, sv)
+            if not prop:
+                await s.bus.emit(Activity("mcp", f"Skipped {sv['name']}: {skip}"))
+                continue
+            s.props[sv["name"]] = prop
+            named.append(sv["name"])
+            await s.bus.emit(Activity("mcp", f"Proposed {sv['name']} {prop['why']}. Not installed; say “approve {sv['name']}” to enable it."))
+            if len(named) == 3:
+                break
         s.save()
-        await s.bus.emit(Proposal(need, [sv["name"] for sv in hits[:3]]))
+        if named:
+            await s.bus.emit(Proposal(need, named))
 
     def trust(s, name):
         p = s.props.pop(name, None)

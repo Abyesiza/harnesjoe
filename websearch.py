@@ -122,6 +122,7 @@ def search(query: str, limit: int = 6, fetch: int = 3) -> list[dict]:
             log.warning("search provider %s failed: %s", name, type(e).__name__)
             continue
         if hits:
+            log.info("search provider %s served %d result(s)", name, len(hits))
             for hit in hits[:fetch]:
                 hit.text = page_text(hit.url)
             return [{**asdict(h), "provider": name} for h in hits]

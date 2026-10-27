@@ -44,6 +44,30 @@ def safe_folder(raw: str) -> Path:
     return path
 
 
+RESEARCH_FOLLOWUP = re.compile(
+    r"\b(what did (quill|the research|research) (find|say|conclude)"
+    r"|what (has|have) (quill|the research) found"
+    r"|(last|latest|previous|recent) (research )?(result|finding|job|report)s?"
+    r"|quill(?:'s|’s)? (status|progress|findings?|results?)"
+    r"|research (status|progress|results?|findings?)"
+    r"|is (quill|the research) (done|finished|still)"
+    r"|how far (is|has) quill"
+    r"|what (did |has )?quill (found|find))\b"
+)
+NEW_RESEARCH = re.compile(
+    r"\b(research (this|into|on|about|how|what|whether|why|the)|look (through|into|at)|investigate|survey|list|compare|review|check out)\b"
+)
+
+
+NEW_RESEARCH_ASK = re.compile(r"^\s*(?:ask|tell|have|get)\s+quill\s+(?:to\s+)?(?:research|investigate|survey|look\s+(?:into|through|at))\b", re.I)
+
+
+def is_research_followup(text: str) -> bool:
+    """Only explicit questions about earlier research replay its result; new requests start a new job."""
+    lower = text.lower()
+    return bool(RESEARCH_FOLLOWUP.search(lower)) and not NEW_RESEARCH.search(lower) and not folders_in(text)
+
+
 def _as_dir(raw: str) -> str | None:
     candidate = Path(raw.strip().rstrip(TRAILING)).expanduser()
     return str(candidate) if candidate.is_absolute() and candidate.is_dir() else None
@@ -75,6 +99,48 @@ async def read_only(agent, prompt: str, cwd: str, folders: list[str]) -> str:
         return await agent.ask(prompt, folders[0] if folders else cwd)
     finally:
         ACCESS.reset(token)
+
+
+def lobby() -> str:
+    """Neutral working folder for member chats with no named folder. Never ~/.fam: that holds the
+    token, the state database and logs, and is a git repo the CLIs would otherwise wander into."""
+    path = Path.home() / ".local" / "share" / "fam" / "lobby"
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return str(path)
+
+
+JOB_ID = re.compile(r"\b([0-9a-f]{8})\b")
+FOUND = re.compile(r"\bwhat (?:did |has |have )?(\w+) (?:find|found|say|said|conclude|concluded|report|reported)\b", re.I)
+MODEL_Q = re.compile(r"\b(?:which|what) (?:model|llm|cli)s?\b.*?\b(?:does|do|is|for|of)\s+(\w+)|\b(\w+)(?:'s|’s) model\b", re.I)
+LOCAL_HINT = re.compile(r"\b(project|folder|foldr|repo|repository|codebase|directory|dir)\b", re.I)
+SEARCH_ROOTS = ("Desktop", "Desktop/my_projects", "Downloads", "Projects", "projects", "code", "src", "dev", "work", "repos", "")
+STOP = {"the", "a", "an", "my", "our", "this", "that", "project", "folder", "foldr", "repo", "codebase", "read", "through", "lets", "let", "do", "look", "into", "at", "of", "in", "on", "for", "and"}
+
+
+def local_projects(text: str, approved: list[str]) -> list[str]:
+    """Folders on this machine whose name matches a word in the message: approved folders first,
+    then common project locations. Local projects win over a web search for the same name."""
+    words = {w for w in re.findall(r"[a-z0-9][a-z0-9_.-]{2,}", text.lower()) if w not in STOP}
+    if not words:
+        return []
+    def hit(name: str) -> bool:
+        n = name.lower()
+        return any(n == w or n.startswith(w) or (len(n) >= 4 and n in w) for w in words)
+    found = [d for d in approved if hit(Path(d).name)]
+    if found:
+        return found
+    home = Path.home()
+    for root in SEARCH_ROOTS:
+        base = home / root
+        try:
+            kids = sorted(base.iterdir()) if base.is_dir() else []
+        except OSError:
+            continue
+        for kid in kids:
+            if kid.is_dir() and not kid.name.startswith(".") and hit(kid.name) and str(kid) not in found:
+                found.append(str(kid))
+    # Prefer real projects (git repos) and exact names.
+    return sorted(found, key=lambda d: (not (Path(d) / ".git").exists(), Path(d).name.lower() not in words))[:3]
 
 
 def folder_in(text: str) -> str | None:
@@ -132,10 +198,14 @@ class StateStore:
                     started REAL NOT NULL,
                     ended REAL,
                     output TEXT NOT NULL DEFAULT '',
-                    fallbacks TEXT NOT NULL DEFAULT '[]'
+                    fallbacks TEXT NOT NULL DEFAULT '[]',
+                    commands TEXT NOT NULL DEFAULT '[]'
                 );
                 """
             )
+            cols = {r[1] for r in db.execute("PRAGMA table_info(runs)")}
+            if "commands" not in cols:  # databases created before shell logging
+                db.execute("ALTER TABLE runs ADD COLUMN commands TEXT NOT NULL DEFAULT '[]'")
         s.path.chmod(0o600)
 
     def connect(s):
@@ -240,6 +310,18 @@ class StateStore:
             chain = [*json.loads(got["fallbacks"]), {"failed": failed, "to": to, "reason": reason[:300]}]
             db.execute("UPDATE runs SET fallbacks=?, cli=? WHERE id=?", (json.dumps(chain), to, run_id))
 
+    def run_command(s, run_id: str, entry: dict) -> list[dict]:
+        """Insert or update one shell command (matched by command+started) on a run."""
+        with s.connect() as db:
+            got = db.execute("SELECT commands FROM runs WHERE id=?", (run_id,)).fetchone()
+            if not got:
+                return []
+            cmds = json.loads(got["commands"] or "[]")
+            key = (entry.get("command"), entry.get("started"))
+            cmds = [c for c in cmds if (c.get("command"), c.get("started")) != key] + [entry]
+            db.execute("UPDATE runs SET commands=? WHERE id=?", (json.dumps(cmds[-100:]), run_id))
+        return cmds
+
     def run_finish(s, run_id: str, status: str, output: str, cli: str = "") -> dict | None:
         with s.connect() as db:
             db.execute(
@@ -251,7 +333,7 @@ class StateStore:
     def runs(s, limit: int = 100) -> list[dict]:
         with s.connect() as db:
             rows = db.execute("SELECT * FROM runs ORDER BY started DESC LIMIT ?", (limit,)).fetchall()
-        return [{**dict(r), "fallbacks": json.loads(r["fallbacks"])} for r in rows]
+        return [{**dict(r), "fallbacks": json.loads(r["fallbacks"]), "commands": json.loads(r["commands"] or "[]")} for r in rows]
 
     def interrupt_runs(s) -> int:
         with s.connect() as db:
@@ -480,9 +562,56 @@ class Skipper:
             f"{'Waiting for your answer on task(s): ' + ', '.join(q['task']['id'] for q in questions) + '. ' if questions else ''}"
             f"{'Accepted work ready to apply locally: ' + ', '.join(local_apply) + '. ' if local_apply else ''}"
             f"{'Interrupted task(s), safely preserved: ' + ', '.join(interrupted) + '. Say “resume” to continue the latest. ' if interrupted else ''}"
-            f"Budget ${h['budget']['spent']:.2f} of ${h['budget']['cap']:.2f}. "
+            f"Estimated spend today ${h['budget']['spent']:.3f} of ${h['budget']['cap']:.2f} (rough: characters/4 × list price). "
             f"Local state is saved on this computer. I’ll tell you when work is assigned, blocked, ready, or needs your decision."
         )
+
+    def folders_for(s, text: str, task: str = "") -> list[str]:
+        """Folders named as paths in the message or the planned task, else local projects by name."""
+        found = list(dict.fromkeys([*folders_in(text), *folders_in(task)]))
+        if found:
+            return found
+        if LOCAL_HINT.search(text) or LOCAL_HINT.search(task):
+            return local_projects(f"{text} {task}", s.store.approved_folders())
+        return []
+
+    def no_folder_reply(s, text: str) -> str:
+        return ("That sounds like a local project, but I couldn’t find a matching folder in the approved folders or the usual "
+                "project locations, so I haven’t started a web search. Send me its full path (for example /home/you/Projects/name).")
+
+    def report_for(s, job: str) -> str:
+        """The latest full report Skipper stored for a task or research job id."""
+        rows = [m for m in s.store.messages(limit=2000) if m.get("task") == job and m["role"] == "skipper" and not m["text"].startswith("ℹ️")]
+        reports = [m for m in rows if "\n" in m["text"] or "finished" in m["text"] or "failed" in m["text"]]
+        return (reports or rows)[-1]["text"] if (reports or rows) else ""
+
+    def direct_answer(s, text: str, app) -> tuple[str, str] | None:
+        """Questions answerable from state or config, without a model call: job ids, member findings, models."""
+        if m := MODEL_Q.search(text):
+            key = (m.group(1) or m.group(2) or "").lower()
+            agent = app.cast.get(key) or next((a for a in app.cast.values() if a.persona.name.lower() == key), None)
+            if agent is not None:
+                chain = [agent, *getattr(agent, "fallbacks", [])]
+                hops = " → ".join(f"{a.cli}" + (f" ({a.model})" if getattr(a, "model", "") else "") for a in chain)
+                return f"{agent.persona.name} uses {hops}. The first entry is tried first; the rest are fallbacks.", ""
+        events = None
+        for job in JOB_ID.findall(text.lower()):
+            if report := s.report_for(job):
+                return report, job
+            events = events if events is not None else s.store.events(limit=100000)
+            if any(isinstance(e["data"], dict) and job in (e["data"].get("id"), (e["data"].get("task") or {}).get("id") if isinstance(e["data"].get("task"), dict) else e["data"].get("task")) for e in events):
+                done = {"Finding", "Decision", "Applied", "Error"}
+                state = [e["type"] for e in events if isinstance(e["data"], dict) and job in (e["data"].get("id"), e["data"].get("task") if isinstance(e["data"].get("task"), str) else (e["data"].get("task") or {}).get("id"))]
+                return (f"Job {job} has no final report yet (latest event: {state[-1]})." if not done & set(state) else f"Job {job} finished ({state[-1]}) but no report was stored."), job
+        if (m := FOUND.search(text)) and (who := m.group(1).lower()) not in {"you", "i", "we", "it", "they"}:
+            agent = app.cast.get(who) or next((a for a in app.cast.values() if a.persona.name.lower() == who), None)
+            if agent is not None:
+                name = agent.persona.name
+                rows = [x for x in s.store.messages(limit=2000) if x["role"] == "skipper" and x.get("task") and x["text"].startswith(name) and "\n" in x["text"]]
+                if rows:
+                    return rows[-1]["text"], rows[-1]["task"]
+                return f"I don’t have a finished report from {name} yet.", ""
+        return None
 
     async def chat(s, text, repo, app, enqueue):
         text = text.strip()
@@ -542,10 +671,10 @@ class Skipper:
             reply = f"I’m checking whether the accepted changes for task {wanted} can now be applied safely."
             assistant = s.store.message("skipper", reply, wanted)
             return {"reply": reply, "task": wanted, "member": None, "messages": [user, assistant]}
-        if re.search(r"\b(research|quill)\b", lower) and (
-            re.search(r"\b(status|progress|far|going|done|finished)\b", lower)
-            or re.search(r"\b(what did|what has|find out|findings|results|previous)\b", lower)
-        ):
+        if answered := s.direct_answer(text, app):
+            assistant = s.store.message("skipper", answered[0], answered[1] or None)
+            return {"reply": answered[0], "task": answered[1] or None, "messages": [user, assistant]}
+        if is_research_followup(text):
             jobs = s.health(app)["research"]
             active = [job for job in jobs if job["status"] == "running"]
             if active:
@@ -557,7 +686,7 @@ class Skipper:
                 failed = [job for job in jobs if job["status"] == "failed"]
                 if finished:
                     job = finished[-1]
-                    reply = f"Quill finished job {job['id']}: {job['summary'] or job['question']}"
+                    reply = s.report_for(job["id"]) or f"Quill finished job {job['id']}: {job['summary'] or job['question']}"
                 elif failed:
                     job = failed[-1]
                     reply = f"Quill’s latest research job {job['id']} failed: {job['summary']}"
@@ -592,12 +721,24 @@ class Skipper:
             reply = f"I approved {name}. I’ll keep it available for tasks that need it."
             assistant = s.store.message("skipper", reply)
             return {"reply": reply, "task": None, "messages": [user, assistant]}
+        if asked := NEW_RESEARCH_ASK.search(text):
+            question = re.sub(r"^\s*(this|that|it)?\s*[:,-]?\s*", "", text[asked.end():]) or text
+            folders = s.folders_for(text, question)
+            if not folders and LOCAL_HINT.search(text):
+                reply = s.no_folder_reply(text)
+                assistant = s.store.message("skipper", reply)
+                return {"reply": reply, "task": None, "messages": [user, assistant]}
+            research = ResearchRequest(question, folders)
+            enqueue(research, research.id)
+            reply = f"I’ve assigned this research to Quill (job {research.id}). I’ll show its progress here and report the findings."
+            assistant = s.store.message("skipper", reply)
+            return {"reply": reply, "task": None, "research": research.id, "messages": [user, assistant]}
         for key, agent in app.cast.items():
             prefix = re.match(rf"^(?:ask|tell|talk to)\s+{re.escape(agent.persona.name)}\s*[:,]?\s*", text, re.IGNORECASE)
             if prefix:
                 ask = text[prefix.end():].strip() or text
-                prompt = f"Answer the user conversationally as {agent.persona.name}. Do not edit files, run commands, or start implementation work.\nUser: {ask}"
-                reply = await read_only(agent, prompt, app.lead.root, folders_in(text))
+                prompt = f"Answer the user conversationally as {agent.persona.name}. You may run read-only inspection commands inside the approved folders. Do not edit files or start implementation work.\nUser: {ask}"
+                reply = await read_only(agent, prompt, lobby(), s.folders_for(text))
                 assistant = s.store.message("member", f"{agent.persona.name}: {reply}")
                 return {"reply": assistant["text"], "task": None, "messages": [user, assistant]}
         members = [
@@ -625,7 +766,7 @@ class Skipper:
             f"{PLAN}\nFamily and workload: {json.dumps(members)}\nTools and proposals: {json.dumps(tools)}"
             f"\nQuestions waiting for the user: {json.dumps(questions)}"
             f"\nRecent conversation: {json.dumps(context[-10:])}\nCurrent repository: {repo}\nUser message: {text}",
-            app.lead.root,
+            lobby(),
         )
         plan = clean_plan(plan)
         intent = plan["intent"]
@@ -647,8 +788,8 @@ class Skipper:
             member = str(plan.get("member", "")).strip().lower()
             if member not in app.cast:
                 raise ValueError("Skipper could not identify which family member you want to speak with.")
-            prompt = f"Answer the user conversationally as {app.cast[member].persona.name}. Do not edit files or run commands.\nUser: {text}"
-            reply = await read_only(app.cast[member], prompt, app.lead.root, folders_in(text))
+            prompt = f"Answer the user conversationally as {app.cast[member].persona.name}. You may run read-only inspection commands inside the approved folders. Do not edit files.\nUser: {text}"
+            reply = await read_only(app.cast[member], prompt, lobby(), s.folders_for(text))
             assistant = s.store.message("member", f"{app.cast[member].persona.name}: {reply}")
             return {"reply": assistant["text"], "task": None, "messages": [user, assistant]}
         elif intent == "answer_question":
@@ -678,7 +819,12 @@ class Skipper:
             assistant = s.store.message("skipper", reply, wanted)
             return {"reply": reply, "task": wanted, "member": question["member"], "messages": [user, assistant]}
         elif intent == "research":
-            research = ResearchRequest(str(plan.get("task") or text), folders_in(text))
+            folders = s.folders_for(text, str(plan.get("task") or ""))
+            if not folders and LOCAL_HINT.search(text):
+                reply = s.no_folder_reply(text)
+                assistant = s.store.message("skipper", reply)
+                return {"reply": reply, "task": None, "messages": [user, assistant]}
+            research = ResearchRequest(str(plan.get("task") or text), folders)
             enqueue(research, research.id)
             reply = reply or f"I’ve assigned this research to Quill (job {research.id}). I’ll show its progress here and report the findings."
         elif intent == "focus":

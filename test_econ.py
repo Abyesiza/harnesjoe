@@ -33,7 +33,7 @@ def test_agent_refuses_past_budget(tmp_path):
 
 def test_model_flag_and_price():
     a = ClaudeCode(Persona("T", "m"), None, "claude-haiku-5-5")
-    assert a.argv("p") == ["claude", "-p", "--model", "claude-haiku-5-5", "p"] and a.price == 0.10
+    assert a.argv("p") == ["claude", "-p", "--model", "claude-haiku-5-5", "--", "p"] and a.price == 0.10
 
 
 def test_wrap_prefix_is_applied(tmp_path):

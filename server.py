@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 
@@ -23,7 +24,7 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import core
@@ -39,6 +40,9 @@ from core import (
     Tick,
     Ticker,
 )
+import reports
+import uploads
+import urllib.parse
 from link import ready
 from skipper import Skipper, StateStore, folders_in, safe_folder
 
@@ -90,10 +94,30 @@ class Feed:
             ),
             "Said": lambda d: f"{d['name']}: {d['text']}",
         }
-        if kind in summaries:
-            s.store.message("skipper", summaries[kind](data), task_id or None)
+        if kind in summaries or kind in ("Finding", "Scouted"):
+            s.store.message("skipper", s.report(kind, data, summaries), task_id or data.get("id") or None)
         for q in s.waiters:
             q.put_nowait(ev)
+
+
+    def report(s, kind, data, summaries):
+        """Turn a finished event into a structured, readable report for Joel."""
+        def runs(tid):
+            return [r for r in s.store.runs(500) if tid and r["task"] == tid]
+        try:
+            if kind == "Finding":
+                return reports.research(data, runs(data.get("id")))
+            if kind == "Scouted":
+                return reports.scouted(data)
+            first = summaries[kind](data)
+            if kind == "Decision":
+                return reports.decision(data, runs(data["task"]["id"]), first)
+            if kind == "Error" and not data["message"].startswith("Work was interrupted"):
+                return reports.error(data, runs(data.get("task", "")), first)
+            return first
+        except (KeyError, TypeError, ValueError) as e:  # a report must never break the feed
+            log.warning("report for %s failed: %s", kind, e)
+            return summaries[kind](data) if kind in summaries else f"{kind} finished."
 
 
 class RunTracker:
@@ -108,10 +132,37 @@ class RunTracker:
         S.store.run_fallback(run_id, failed, to, reason)
         S.feed.push("Fallback", {"run": run_id, "task": CURRENT_TASK.get(), "failed": failed, "to": to, "reason": reason})
 
+    def __init__(self) -> None:
+        self.noticed: set[tuple[str, str]] = set()
+
+    def command(self, run_id: str, entry: dict) -> None:
+        S.store.run_command(run_id, entry)
+        S.feed.push("Command", {"run": run_id, "task": CURRENT_TASK.get(), **entry})
+        task = CURRENT_TASK.get()
+        for path in entry.get("outside") or []:
+            if (task or run_id, path) in self.noticed:
+                continue
+            self.noticed.add((task or run_id, path))
+            note = f"{entry.get('agent') or entry.get('cli') or 'An agent'} read {path}"
+            S.feed.push("Permission", {"run": run_id, "task": task, "agent": entry.get("agent"), "path": path, "text": note})
+            S.store.message("skipper", f"ℹ️ {note} (read-only, outside the approved folders).", task or None)
+
     def finish(self, run_id: str, status: str, output: str, cli: str = "") -> None:
         row = S.store.run_finish(run_id, status, output, cli)
         if row:
             S.feed.push("Run", row)
+
+
+IGNORED = ("token", "state.sqlite3", "state.sqlite3-*", "*.log", "ledger.json", "uploads/", "scout/", "work/", "mcp/")
+
+
+def protect_home(home: Path) -> None:
+    """~/.fam may be a git repo; keep secrets, state, logs and clones out of it (the .git is left alone)."""
+    path = home / ".gitignore"
+    have = path.read_text().splitlines() if path.exists() else []
+    missing = [x for x in IGNORED if x not in have]
+    if missing:
+        path.write_text("\n".join([*have, *(["# added by Fam: never commit secrets, state or logs"] if not have else []), *missing]) + "\n")
 
 
 def write_token(home: Path) -> str:
@@ -178,6 +229,8 @@ async def life(_):
             S.app.lead.reward[member] += float(data["reward"])
     S.feed = Feed(S.app.bus, S.store)
     Agent.tracker = RunTracker()
+    Agent.ledger.attach(Path(S.store.path).parent / "ledger.json")
+    protect_home(Path(S.store.path).parent)
     records = S.store.events(limit=100000)
     interrupted_research = {
         event["data"].get("task")
@@ -185,15 +238,16 @@ async def life(_):
         if event["type"] == "Error"
         and event["data"].get("message", "").startswith("Research was interrupted by a Skipper restart.")
     }
+    retried = {m.group(1) for e in records if e["type"] == "Error" for m in [re.search(r"restarted automatically as job (\w+)", e["data"].get("message", ""))] if m}
     for research in S.skipper.pending_research(records):
-        if research["id"] not in interrupted_research:
-            S.feed.push(
-                "Error",
-                {
-                    "task": research["id"],
-                    "message": "Research was interrupted by a Skipper restart. Its partial results were not reported as complete; ask Quill to retry.",
-                },
-            )
+        if research["id"] in interrupted_research:
+            continue
+        if research["id"] in retried or not research.get("question"):  # retry once only
+            S.feed.push("Error", {"task": research["id"], "message": "Research was interrupted by a Skipper restart again. Its partial results were not reported as complete; ask Quill to retry."})
+            continue
+        again = ResearchRequest(str(research["question"]), list(research.get("folders") or []))
+        S.feed.push("Error", {"task": research["id"], "message": f"Research was interrupted by a Skipper restart; restarted automatically as job {again.id}."})
+        spawn(S.app.bus.emit(again), again.id)
     interrupted = S.skipper.interrupted_tasks(records)
     notified = {
         event["data"]["task"]
@@ -269,6 +323,7 @@ class WatchIn(BaseModel):
 class ChatIn(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     repo: str = ""
+    attachments: list[str] = Field(default_factory=list, max_length=10)
 
 
 class FolderIn(BaseModel):
@@ -323,6 +378,41 @@ def chat_history():
     return S.store.messages()
 
 
+def fam_home() -> Path:
+    return Path(S.store.path).parent
+
+
+@api.post("/api/upload")
+async def upload(request: Request):
+    """Raw-body upload (no multipart dependency): name in X-Filename. Token checked by middleware."""
+    size = int(request.headers.get("content-length") or 0)
+    if size > uploads.MAX_BYTES:
+        raise HTTPException(413, f"The attachment is larger than {uploads.MAX_BYTES // 1024} KB.")
+    data = b""
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > uploads.MAX_BYTES:
+            raise HTTPException(413, f"The attachment is larger than {uploads.MAX_BYTES // 1024} KB.")
+    try:
+        meta = uploads.save(fam_home(), urllib.parse.unquote(request.headers.get("x-filename", "")), data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    S.feed.push("Activity", {"source": "upload", "text": f"Received {meta['name']} ({meta['size']} bytes)", "level": ""})
+    return {k: meta[k] for k in ("id", "name", "size", "type")}
+
+
+@api.get("/api/uploads/{uid}")
+async def get_upload(uid: str, request: Request):
+    """Previews need the token too: attachments are private."""
+    given = request.headers.get(TOKEN_HEADER, "")
+    if not S.token or not hmac.compare_digest(given, S.token):
+        raise HTTPException(401, "Missing or invalid Fam token.")
+    meta = uploads.find(fam_home(), uid)
+    if not meta:
+        raise HTTPException(404, "No such attachment.")
+    return FileResponse(meta["path"], media_type=meta["type"], headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": f"inline; filename={meta['name']}"})
+
+
 @api.post("/api/chat")
 async def chat(b: ChatIn):
     try:
@@ -338,7 +428,10 @@ async def chat(b: ChatIn):
             work = event if asyncio.iscoroutine(event) else S.app.bus.emit(event)
             spawn(work, task_id or getattr(event, "id", ""))
 
-        return await S.skipper.chat(b.text, repo, S.app, enqueue)
+        files = [f for uid in b.attachments if (f := uploads.find(fam_home(), uid))]
+        if len(files) != len(b.attachments):
+            raise ValueError("One of the attachments was not found; upload it again.")
+        return await S.skipper.chat(b.text + uploads.prompt_block(files), repo, S.app, enqueue)
     except HTTPException:
         raise
     except (ValueError, OSError) as e:

@@ -137,19 +137,27 @@ def test_clean_plan_bounds_fields_and_rejects_unknown_intent():
         clean_plan(["not", "a", "dict"])
 
 
+def split(fake):
+    """Adapt a (rc, out) fake to sh_split's (rc, stdout, stderr)."""
+    async def run(*argv, cwd=None, input=None, timeout=None, env=None, merge=False):
+        rc, out = await fake(*argv, cwd=cwd, input=input, timeout=timeout, env=env)
+        return rc, out, ""
+    return run
+
+
 # ---- CLI fallback --------------------------------------------------------
 
 def run_agent(monkeypatch, responses):
     calls = []
 
-    async def fake_sh(*argv, cwd=None, input=None, timeout=None):
+    async def fake_sh(*argv, cwd=None, input=None, timeout=None, env=None):
         calls.append(argv[0])
         result = responses[argv[0]]
         if isinstance(result, BaseException):
             raise result
         return result
 
-    monkeypatch.setattr(agents, "sh", fake_sh)
+    monkeypatch.setattr(agents, "sh_split", split(fake_sh))
     tracker = Recorder()
     monkeypatch.setattr(Agent, "tracker", tracker)
     agent = Copilot(Persona(), None, fallbacks=[ClaudeCode(Persona(), None)])
@@ -351,20 +359,20 @@ def test_copilot_read_only_access_args(spaced):
 
 
 def test_no_access_args_by_default():
-    assert ClaudeCode(Persona(), None).argv("x") == ["claude", "-p", "x"]
+    assert ClaudeCode(Persona(), None).argv("x") == ["claude", "-p", "--", "x"]
 
 
 def test_research_job_runs_in_named_folder_with_read_only_access_on_fallback(monkeypatch, spaced):
     # Arrange
     calls = []
 
-    async def fake_sh(*argv, cwd=None, input=None, timeout=None):
+    async def fake_sh(*argv, cwd=None, input=None, timeout=None, env=None):
         calls.append((list(argv), cwd))
         if argv[0] == "copilot":
             return 1, "denied"
         return 0, '{"candidates": {"app": 1.0}, "gaps": [], "say": "found app", "confidence": 0.9}'
 
-    monkeypatch.setattr(agents, "sh", fake_sh)
+    monkeypatch.setattr(agents, "sh_split", split(fake_sh))
     monkeypatch.setattr(Agent, "tracker", None)
     searched = []
     quill = Copilot(Persona(), None, fallbacks=[ClaudeCode(Persona(), None)])
@@ -378,3 +386,178 @@ def test_research_job_runs_in_named_folder_with_read_only_access_on_fallback(mon
         assert argv[argv.index("--add-dir") + 1] == str(spaced)
     assert "--allowedTools" in calls[1][0]
     assert searched == []  # local paths are never sent to a web search engine
+
+
+# ---- research follow-ups vs new jobs, and early stopping -----------------
+
+from core import Finding, Node, on
+from skipper import is_research_followup
+
+
+@pytest.mark.parametrize("text", [
+    "Ask Quill to research this: list the projects in /home/joel-abyesiza/Metis Projects, read-only",
+    "Research the best Python task queue, including status of maintenance",
+    "Quill, look through the repo and tell me if tests are done",
+    "research how far apart the releases are",
+])
+def test_new_research_requests_are_not_replayed(text):
+    assert is_research_followup(text) is False
+
+
+@pytest.mark.parametrize("text", ["What did Quill find?", "show me the last research result", "Is Quill done yet?", "quill's progress?", "research status"])
+def test_explicit_followups_replay(text):
+    assert is_research_followup(text) is True
+
+
+class Scripted:
+    def __init__(self, *replies):
+        self.replies, self.calls = list(replies), []
+
+    async def ask_json(self, text, cwd="."):
+        self.calls.append(cwd)
+        return self.replies.pop(0)
+
+
+def dig(agent, request, **kw):
+    bus, found = Bus(), []
+
+    class Sink(Node):
+        @on(Finding)
+        async def got(self, f):
+            found.append(f)
+
+    Sink(bus)
+    asyncio.run(Researcher(bus, agent, web=lambda q: [], **kw).dig(request))
+    return found[0]
+
+
+def test_local_folder_job_is_capped_at_two_rounds(spaced):
+    # Arrange
+    agent = Scripted(*({"candidates": {"x": i / 10}, "gaps": ["more"]} for i in range(8)))
+    # Act
+    finding = dig(agent, ResearchRequest("list projects", [str(spaced)]))
+    # Assert
+    assert finding.rounds == 2 and len(agent.calls) == 2 and finding.reason == "budget"
+
+
+def test_research_settles_early_when_model_is_done():
+    # Arrange
+    agent = Scripted({"candidates": {"a": 0.6}, "gaps": ["x"]}, {"candidates": {"a": 0.9}, "gaps": [], "done": True}, {"candidates": {"b": 1}})
+    # Act
+    finding = dig(agent, ResearchRequest("q"))
+    # Assert
+    assert finding.rounds == 2 and finding.reason == "settled"
+
+
+@pytest.mark.parametrize("reply", [{"candidates": {"a": 1}, "gaps": ["open"], "done": True}, {"candidates": {}, "gaps": [], "done": True}, {"candidates": {"a": 1}, "gaps": [], "done": "yes"}])
+def test_done_without_answer_or_with_gaps_does_not_settle(reply):
+    # Arrange
+    agent = Scripted(reply, reply, reply)
+    # Act
+    finding = dig(agent, ResearchRequest("q"), rounds=3, patience=99)
+    # Assert
+    assert finding.rounds == 3 and finding.reason == "budget"
+
+
+def test_ask_quill_to_research_starts_a_new_job(tmp_path):
+    # Arrange
+    from test_skipper import app
+    from skipper import Skipper
+    from server import StateStore
+    site, queued = app(tmp_path), []
+    folder = tmp_path / "My Projects"
+    folder.mkdir()
+    state = StateStore(tmp_path / "state.sqlite3")
+    # Act
+    result = asyncio.run(Skipper(state, site.skipper).chat(
+        f"Ask Quill to research this: list the projects in {folder}, read-only", str(tmp_path), site, lambda e, *a: queued.append(e)))
+    # Assert
+    assert isinstance(queued[0], ResearchRequest) and queued[0].folders == [str(folder)]
+    assert result["research"] == queued[0].id
+
+
+# ---- reports, provider tracking, restart ---------------------------------
+
+import reports
+
+
+def test_research_report_is_structured_and_names_provider():
+    # Arrange
+    finding = {"id": "j1", "question": "best queue", "candidates": {"celery": 0.8, "rq": 0.2}, "rounds": 2, "reason": "settled",
+               "say": "Celery fits.", "sources": [{"title": "t", "url": "https://a.dev", "provider": "tavily"}]}
+    runs = [{"cli": "copilot", "status": "error", "started": 0.0, "ended": 5.0, "fallbacks": [{"failed": "copilot", "to": "claude", "reason": "quota"}]},
+            {"cli": "claude", "status": "done", "started": 5.0, "ended": 65.0, "fallbacks": []}]
+    # Act
+    text = reports.research(finding, runs)
+    # Assert
+    for part in ("Asked: best queue", "Result: Celery fits.", "via tavily", "copilot→claude (quota)", "took 1m 5s", "Problems: none", "settled early"):
+        assert part in text
+
+
+def test_research_report_flags_missing_answer():
+    # Arrange / Act
+    text = reports.research({"id": "j2", "question": "q", "candidates": {}, "rounds": 1, "reason": "budget"}, [])
+    # Assert
+    assert "Problems: no answer reached" in text and "no CLI calls recorded" in text
+
+
+def test_error_report_states_reason_and_next_step():
+    # Arrange / Act
+    text = reports.error({"task": "t9", "message": "RuntimeError: tests failed"}, [], "Task t9 needs attention.")
+    # Assert
+    assert "Reason: RuntimeError: tests failed" in text and "resume task t9" in text
+
+
+def test_search_tags_provider_and_falls_back(monkeypatch):
+    # Arrange
+    import websearch
+    from websearch import Source
+
+    def broken(q, n):
+        raise OSError("down")
+
+    monkeypatch.setattr(websearch, "providers", lambda: [("tavily", broken), ("duckduckgo", lambda q, n: [Source("T", "https://x.dev", "s")])])
+    monkeypatch.setattr(websearch, "page_text", lambda url: "")
+    # Act
+    hits = websearch.search("q")
+    # Assert
+    assert hits[0]["provider"] == "duckduckgo"
+
+
+def test_tavily_is_first_when_key_set(monkeypatch):
+    # Arrange
+    import websearch
+    monkeypatch.setenv("TAVILY_API_KEY", "x")
+    # Act
+    names = [n for n, _ in websearch.providers()]
+    # Assert
+    assert names[0] == "tavily" and names[-1] == "duckduckgo"
+
+
+def test_restart_uses_systemd_when_service_active(monkeypatch, capsys):
+    # Arrange
+    import daemon
+    calls = []
+    monkeypatch.setattr(daemon, "request", lambda path: {"pid": 1})
+    monkeypatch.setattr(daemon, "service_active", lambda: True)
+    monkeypatch.setattr(daemon.subprocess, "run", lambda cmd, check: calls.append(cmd))
+    monkeypatch.setattr(daemon, "wait_healthy", lambda old, timeout=180.0: {"pid": 2})
+    # Act
+    daemon.restart()
+    # Assert
+    assert calls == [["systemctl", "--user", "restart", "fam.service"]] and "PID 2" in capsys.readouterr().out
+
+
+def test_restart_without_service_stops_then_starts(monkeypatch):
+    # Arrange
+    import daemon
+    order = []
+    monkeypatch.setattr(daemon, "request", lambda path: (_ for _ in ()).throw(daemon.URLError("down")))
+    monkeypatch.setattr(daemon, "service_active", lambda: False)
+    monkeypatch.setattr(daemon, "stop", lambda: order.append("stop"))
+    monkeypatch.setattr(daemon, "start", lambda: order.append("start"))
+    monkeypatch.setattr(daemon, "wait_healthy", lambda old, timeout=180.0: {"pid": 3})
+    # Act
+    daemon.restart()
+    # Assert
+    assert order == ["stop", "start"]

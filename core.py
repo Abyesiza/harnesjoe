@@ -20,6 +20,7 @@ class Access:
 
     dirs: tuple[str, ...] = ()
     readonly: bool = False
+    untrusted: bool = False  # untrusted code: inspect only, never execute it (no tests/builds)
 
 
 ACCESS: ContextVar[Access] = ContextVar("fam_access", default=Access())  # noqa: B039 - frozen, immutable
@@ -262,19 +263,38 @@ class Ticker(Node):
             await asyncio.sleep(every)
 
 
-async def sh(*argv: str, cwd: str | None = None, input: str | None = None, timeout: float | None = None) -> tuple[int, str]:
-    p = await asyncio.create_subprocess_exec(*argv, cwd=cwd, stdin=PIPE if input is not None else None, stdout=PIPE, stderr=STDOUT)
+async def sh(*argv: str, cwd: str | None = None, input: str | None = None, timeout: float | None = None, env: dict | None = None) -> tuple[int, str]:
+    rc, out, _ = await sh_split(*argv, cwd=cwd, input=input, timeout=timeout, env=env, merge=True)
+    return rc, out
+
+
+async def sh_split(*argv: str, cwd: str | None = None, input: str | None = None, timeout: float | None = None, env: dict | None = None, merge: bool = False) -> tuple[int, str, str]:
+    """Run a command; return (rc, stdout, stderr). With merge, stderr is folded into stdout."""
+    p = await asyncio.create_subprocess_exec(*argv, cwd=cwd, stdin=PIPE if input is not None else None, stdout=PIPE, stderr=STDOUT if merge else PIPE, env=env)
     try:
-        out, _ = await asyncio.wait_for(p.communicate(input.encode() if input is not None else None), timeout)
+        out, err = await asyncio.wait_for(p.communicate(input.encode() if input is not None else None), timeout)
     except TimeoutError:
         p.kill()
         await p.wait()
         raise
-    return p.returncode or 0, out.decode(errors="replace")
+    return p.returncode or 0, out.decode(errors="replace"), (err or b"").decode(errors="replace")
+
+
+FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 
 def jsonin(text):
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        raise ValueError(text[:80])
-    return json.loads(m.group())
+    """The first JSON object in model output. Tolerates code fences, prose before or after, and
+    several objects in a row (the old greedy regex joined them and raised "Extra data")."""
+    text = str(text)
+    blocks = [m.group(1) for m in FENCE.finditer(text)] + [text]
+    dec = json.JSONDecoder()
+    for block in blocks:
+        for m in re.finditer(r"\{", block):
+            try:
+                obj, _ = dec.raw_decode(block, m.start())
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    raise ValueError(f"no JSON object in model output: {text[:80]}")

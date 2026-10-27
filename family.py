@@ -40,7 +40,7 @@ from mind import Brain, dist, enc, kl, spread
 RUBRIC = (
     "Research to the recommended standard: primary sources first, two independent sources per key claim, "
     "search for evidence against the leading option, resolve conflicts. "
-    'Reply only {"candidates": {"<option>": <confidence 0..1>}, "gaps": ["<open issue>"], "sources": ["<url you relied on>"], "say": "<one short line in your voice>"}.'
+    'Reply only {"candidates": {"<option>": <confidence 0..1>}, "gaps": ["<open issue>"], "sources": ["<url you relied on>"], "say": "<one short line in your voice>", "done": <true when no open gaps remain and the answer is settled>}.'
 )
 REVIEW = 'Review the working tree changes without editing anything. Reply only {"accept": <0..1>, "say": "<one short line in your voice>"}.'
 IDEA = 'Look at the working tree changes without editing anything. Reply only {"idea": "<one imperative sentence from your lens>", "say": "<one short line in your voice>"}.'
@@ -336,9 +336,10 @@ def _evidence(sources: list[dict]) -> str:
 
 
 class Researcher(Node):
-    def __init__(s, bus, agent, eps=0.02, patience=2, rounds=8, web=None, searches=3):
+    def __init__(s, bus, agent, eps=0.02, patience=2, rounds=8, web=None, searches=3, local_rounds=2):
         super().__init__(bus)
         s.agent, s.eps, s.patience, s.rounds, s.web, s.searches = agent, eps, patience, rounds, web, searches
+        s.local_rounds = local_rounds
 
     async def look(s, job: str, query: str) -> list[dict]:
         if not s.web:
@@ -348,7 +349,10 @@ class Researcher(Node):
         except Exception as e:  # network or parser failures must not kill the research job
             await s.bus.emit(Activity("research", f"Web search failed for '{query[:80]}': {type(e).__name__}", "error"))
             return []
-        await s.bus.emit(Searched(job, query, [{"title": h["title"], "url": h["url"], "snippet": h.get("snippet", "")} for h in hits]))
+        provider = hits[0].get("provider", "") if hits else ""
+        await s.bus.emit(Searched(job, query, [{"title": h["title"], "url": h["url"], "snippet": h.get("snippet", ""), "provider": h.get("provider", "")} for h in hits]))
+        if provider:
+            await s.bus.emit(Activity("research", f"Web search via {provider}: {len(hits)} result(s) for '{query[:80]}'."))
         if not hits:
             await s.bus.emit(Activity("research", f"No web results for '{query[:80]}'.", "warning"))
         return hits
@@ -363,8 +367,10 @@ class Researcher(Node):
         local = f"\nLocal folders you may inspect read-only (use ls, git status/log, Read, Glob, Grep; change nothing): {folders}" if folders else ""
         # Never send private local paths to a web search engine.
         sources = [] if folders else await s.look(q.id, q.question)
-        searched, prev, calm, gaps, r, n = {q.question}, {}, 0, [], {}, 0
-        for n in range(1, s.rounds + 1):
+        searched, prev, calm, gaps, r, n, settled = {q.question}, {}, 0, [], {}, 0, False
+        # A local folder survey is answered by reading the folder, not by iterating on web evidence.
+        rounds = min(s.rounds, s.local_rounds) if folders else s.rounds
+        for n in range(1, rounds + 1):
             evidence = _evidence(sources) or "No web evidence was available; say so and lower confidence."
             r = await s.agent.ask_json(
                 f"{RUBRIC}\nQuestion: {q.question}{local}\nClose these gaps first: {gaps}\n"
@@ -375,7 +381,9 @@ class Researcher(Node):
             names = sorted(prev.keys() | cands.keys())
             calm = calm + 1 if prev and names and kl(dist(cands, names), dist(prev, names)) < s.eps else 0
             prev, gaps = cands, [str(g)[:200] for g in r.get("gaps", [])][:5] if isinstance(r.get("gaps"), list) else []
-            if calm >= s.patience:
+            # Early settle: the model says it is done and lists no open gaps, with at least one answer.
+            settled = r.get("done") is True and not gaps and bool(cands)
+            if calm >= s.patience or settled:
                 break
             gap = next((g for g in gaps if g not in searched), None)
             if gap and not folders and len(searched) < s.searches:
@@ -383,10 +391,10 @@ class Researcher(Node):
                 known = {x["url"] for x in sources}
                 sources += [h for h in await s.look(q.id, f"{q.question} {gap}") if h["url"] not in known]
         cited = {str(u) for u in r.get("sources", [])} if isinstance(r.get("sources"), list) else set()
-        refs = [{"title": x["title"], "url": x["url"]} for x in sources if not cited or x["url"] in cited] or [
-            {"title": x["title"], "url": x["url"]} for x in sources
+        refs = [{"title": x["title"], "url": x["url"], "provider": x.get("provider", "")} for x in sources if not cited or x["url"] in cited] or [
+            {"title": x["title"], "url": x["url"], "provider": x.get("provider", "")} for x in sources
         ]
-        await s.bus.emit(Finding(q.question, prev, n, "converged" if calm >= s.patience else "budget", str(r.get("say", ""))[:500], q.id, refs[:10]))
+        await s.bus.emit(Finding(q.question, prev, n, "settled" if settled else "converged" if calm >= s.patience else "budget", str(r.get("say", ""))[:500], q.id, refs[:10]))
 
 
 class Gate(Node):

@@ -50,7 +50,7 @@ def serve():
 
     from server import api
 
-    uvicorn.run(api, host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), log_level="info")
+    uvicorn.run(api, host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), log_level="info", timeout_graceful_shutdown=5)  # open SSE streams never end on their own
 
 
 def start():
@@ -105,6 +105,45 @@ def start():
         print(f"Skipper is running at {BASE}")
         return
     print(f"Skipper is starting (PID {process.pid}). See {LOG} for details.")
+
+
+def service_active() -> bool:
+    try:
+        done = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "fam.service"], check=False)
+    except FileNotFoundError:
+        return False
+    return done.returncode == 0
+
+
+def wait_healthy(old_pid=None, timeout: float = 180.0) -> dict:
+    """Wait until a new server answers /api/health and the auth token file exists."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            health = request("/api/health")
+        except (HTTPError, URLError, TimeoutError, ConnectionError):
+            health = None
+        if health and health.get("pid") != old_pid and TOKEN.exists():
+            return health
+        time.sleep(1)
+    raise RuntimeError(f"Skipper did not become healthy within {int(timeout)}s. See `journalctl --user -u fam.service` or {LOG}.")
+
+
+def restart():
+    """Restart Skipper: through systemd when the service is installed, otherwise stop then start."""
+    try:
+        old = request("/api/health").get("pid")
+    except (HTTPError, URLError, TimeoutError, ConnectionError):
+        old = None
+    began = time.monotonic()
+    if service_active():
+        subprocess.run(["systemctl", "--user", "restart", "fam.service"], check=True)
+        health = wait_healthy(old)
+    else:
+        stop()
+        start()
+        health = wait_healthy(None)
+    print(f"Skipper restarted (PID {health.get('pid')}) at {BASE} in {time.monotonic() - began:.0f}s.")
 
 
 def up():
@@ -163,9 +202,23 @@ def runs(limit: int = 20) -> None:
         print(f"{r['id']} {r['status']:11} {hops:18}{task} in {r['cwd']}: {r['prompt'][:80]}")
 
 
-def chat(text):
+def upload(path):
+    """Send one file to /api/upload; returns its attachment id."""
+    from urllib.parse import quote as q
+    file = Path(path).expanduser()
+    if not file.is_file():
+        raise SystemExit(f"Not a file: {file}")
+    headers = {"Content-Type": "application/octet-stream", "X-Filename": q(file.name)}
+    if TOKEN.exists():
+        headers["X-Fam-Token"] = TOKEN.read_text().strip()
+    with urlopen(Request(BASE + "/api/upload", data=file.read_bytes(), method="POST", headers=headers), timeout=60) as response:
+        return json.loads(response.read())["id"]
+
+
+def chat(text, attach=()):
     try:
-        result = request("/api/chat", "POST", {"text": text, "repo": os.getcwd()})
+        ids = [upload(f) for f in attach]
+        result = request("/api/chat", "POST", {"text": text, "repo": os.getcwd(), "attachments": ids})
         print(result["reply"])
     except HTTPError as e:
         detail = e.read().decode(errors="replace")
@@ -194,7 +247,7 @@ def install_service():
     service_path = os.pathsep.join(dict.fromkeys([*cli_dirs, os.environ.get("PATH", "")]))
     unit.write_text(
         "[Unit]\nDescription=Fam Skipper local assistant\nAfter=network.target\n\n"
-        "[Service]\nType=simple\n"
+        "[Service]\nType=simple\nTimeoutStopSec=40\n"
         f"WorkingDirectory={unit_path(ROOT)}\n"
         f"ExecStart={quote(sys.executable)} {quote(Path(__file__).resolve())} serve\n"
         f"Environment={quote('FAM_HOME=' + str(HOME))}\n"
@@ -232,10 +285,23 @@ def service_stop():
 def main():
     parser = argparse.ArgumentParser(description="Talk to and manage your local Skipper daemon.")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("up", "start", "stop", "status", "runs", "serve", "install-service", "service-status", "service-stop"):
-        sub.add_parser(name)
+    helps = {
+        "up": "start and open the dashboard",
+        "start": "start in the background",
+        "stop": "stop the background server",
+        "restart": "restart (systemd if fam.service is active, else stop+start); waits for health and token",
+        "status": "show health",
+        "runs": "list recent CLI runs",
+        "serve": "run the server in the foreground",
+        "install-service": "install the systemd user service",
+        "service-status": "show systemd service status",
+        "service-stop": "disable and stop the systemd service",
+    }
+    for name, text in helps.items():
+        sub.add_parser(name, help=text)
     ask = sub.add_parser("chat")
     ask.add_argument("text", nargs="+")
+    ask.add_argument("--attach", action="append", default=[], metavar="FILE", help="attach a file (repeatable)")
     sub.add_parser("talk")
     args = parser.parse_args()
     if args.command == "talk":
@@ -255,13 +321,14 @@ def main():
         "up": up,
         "start": start,
         "stop": stop,
+        "restart": restart,
         "status": status,
         "runs": runs,
         "serve": serve,
         "install-service": install_service,
         "service-status": service_status,
         "service-stop": service_stop,
-    }.get(args.command, lambda: chat(" ".join(args.text)))()
+    }.get(args.command, lambda: chat(" ".join(args.text), args.attach))()
 
 
 if __name__ == "__main__":

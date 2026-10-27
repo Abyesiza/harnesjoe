@@ -5,26 +5,28 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="fam-token" content="__FAM_TOKEN__">
 <title>Skipper</title>
+<script>try{if(localStorage.getItem("fam-theme")==="dark")document.documentElement.dataset.theme="dark"}catch(e){}</script>
 <style>
-:root{color-scheme:dark;--background:222 18% 7%;--card:222 16% 11%;--muted:222 16% 6%;--border:222 14% 20%;--foreground:225 25% 93%;--muted-foreground:224 13% 66%;--primary:217 100% 76%;--primary-foreground:220 40% 10%;--success:145 61% 58%;--warning:43 87% 66%;--destructive:0 100% 74%;--ring:217 100% 76%;--radius:.375rem;
+:root{color-scheme:light;--background:0 0% 100%;--card:0 0% 100%;--muted:210 20% 97%;--border:214 15% 82%;--foreground:0 0% 15%;--muted-foreground:215 12% 36%;--primary:215 77% 47%;--primary-foreground:0 0% 100%;--success:145 63% 27%;--warning:32 95% 30%;--destructive:0 72% 42%;--ring:215 77% 47%;--user:215 77% 47% / .09;--radius:.375rem;
 --bg:hsl(var(--background));--panel:hsl(var(--card));--line:hsl(var(--border));--fg:hsl(var(--foreground));--dim:hsl(var(--muted-foreground));--accent:hsl(var(--primary));--green:hsl(var(--success));--yellow:hsl(var(--warning));--red:hsl(var(--destructive))}
-:focus-visible{outline:2px solid hsl(var(--ring));outline-offset:2px}
+:root[data-theme=dark]{color-scheme:dark;--background:222 18% 7%;--card:222 16% 11%;--muted:222 16% 6%;--border:222 14% 22%;--foreground:225 25% 93%;--muted-foreground:224 13% 70%;--primary:217 100% 76%;--primary-foreground:220 40% 10%;--success:145 61% 58%;--warning:43 87% 66%;--destructive:0 100% 74%;--ring:217 100% 76%;--user:215 40% 18%}
+:focus-visible{outline:3px solid hsl(var(--ring));outline-offset:2px;border-radius:var(--radius)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 .feed{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:6px}
-.feed li{border:1px solid var(--line);border-radius:var(--radius);padding:7px 9px;background:hsl(var(--muted));font-size:12px;overflow-wrap:anywhere}
+.feed li{border:1px solid var(--line);border-radius:var(--radius);padding:8px 10px;background:hsl(var(--muted));font-size:13.5px;overflow-wrap:anywhere}
 .feed li b{color:var(--fg)}.feed li .meta{color:var(--dim);display:block;margin-top:2px}
 .feed a{color:var(--accent)}.feed .error{border-color:hsl(var(--destructive)/.6)}.feed .warn{border-color:hsl(var(--warning)/.6)}
 .status-running{color:var(--yellow)}.status-done{color:var(--green)}.status-failed,.status-interrupted{color:var(--red)}
-.tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}.tabs button{padding:4px 8px;font-size:12px}.tabs button[aria-selected=true]{border-color:var(--accent);color:var(--accent)}
+.tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}.tabs button{padding:5px 9px;font-size:13.5px}.tabs button[aria-selected=true]{border-color:var(--accent);color:var(--accent)}
 .tabpanel[hidden]{display:none}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,sans-serif;height:100vh;display:grid;grid-template-rows:auto 1fr}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,sans-serif;height:100vh;display:grid;grid-template-rows:auto 1fr}
 header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--line)}
-h1{font-size:17px;margin:0}.grow{flex:1}.dim{color:var(--dim);font-size:13px}
+h1{font-size:17px;margin:0}.grow{flex:1}.dim{color:var(--dim);font-size:14px}
 button,input,textarea{font:inherit;color:inherit;background:hsl(var(--muted));border:1px solid var(--line);border-radius:var(--radius);padding:9px 11px}
 button{cursor:pointer;background:var(--panel)}button:hover{border-color:var(--accent)}button:disabled{opacity:.5;cursor:default}
 #repo{width:min(300px,25vw);font-size:12px;padding:7px 9px}
-#connection{color:var(--dim);font-size:12px}
+#connection{color:var(--dim);font-size:13.5px}
 main{min-height:0;display:grid;grid-template-columns:minmax(190px,240px) minmax(360px,1fr) minmax(260px,360px);gap:14px;padding:16px}
 .side,.center{min-height:0;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
 .side{overflow:auto;padding:14px}
@@ -35,18 +37,21 @@ main{min-height:0;display:grid;grid-template-columns:minmax(190px,240px) minmax(
 .member.busy .availability{color:var(--yellow)}
 .center{display:grid;grid-template-rows:auto 1fr auto;overflow:hidden}
 #health{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.pill{border:1px solid var(--line);border-radius:99px;padding:3px 9px;color:var(--dim);font-size:12px}
+.pill{border:1px solid var(--line);border-radius:99px;padding:3px 10px;color:var(--dim);font-size:13px}
 #messages{overflow:auto;display:flex;flex-direction:column;gap:12px;padding:16px}
 .message{max-width:82%;padding:11px 14px;border:1px solid var(--line);border-radius:var(--radius);background:hsl(var(--muted));white-space:pre-wrap;overflow-wrap:anywhere}
-.message.user{align-self:flex-end;background:#1a2a40;border-color:#29476a}
+.message.user{align-self:flex-end;background:hsl(var(--user));border-color:hsl(var(--primary)/.4)}
 .message.skipper,.message.member{align-self:flex-start}
 .message.member{border-left:3px solid var(--accent)}
-.message time{display:block;color:var(--dim);font-size:11px;margin-top:5px}
-.event{align-self:center;color:var(--dim);font-size:12px;text-align:center;padding:4px 12px}
+.message time{display:block;color:var(--dim);font-size:12.5px;margin-top:5px}
+.event{align-self:center;color:var(--dim);font-size:13.5px;text-align:center;padding:4px 12px}
 #empty{margin:auto;text-align:center;color:var(--dim);max-width:440px}
 #empty strong{display:block;color:var(--fg);font-size:21px;margin-bottom:8px}
 #compose{padding:12px 14px;border-top:1px solid var(--line)}
-form{display:grid;grid-template-columns:1fr auto;gap:9px;align-items:end}
+form{display:grid;grid-template-columns:auto 1fr auto;gap:9px;align-items:end}#folder-request-form{display:flex}
+#attach-button{height:44px}#compose.drag{outline:3px dashed var(--accent);outline-offset:-6px}
+#chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}.chip{display:flex;gap:6px;align-items:center;border:1px solid var(--line);border-radius:var(--radius);padding:4px 8px;font-size:13.5px;background:hsl(var(--muted))}.chip img,.message img{max-width:160px;max-height:120px;border-radius:var(--radius);display:block}.chip button{padding:0 6px}
+.message .files{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}.message .file{font-size:13.5px;color:var(--dim)}
 textarea{width:100%;min-height:58px;max-height:200px;resize:vertical}
 form button{height:44px;padding-inline:18px;background:var(--accent);color:hsl(var(--primary-foreground));font-weight:650}
 #error{color:var(--red);font-size:13px;min-height:18px}
@@ -76,6 +81,7 @@ form button{height:44px;padding-inline:18px;background:var(--accent);color:hsl(v
   <input id="repo" aria-label="Selected project folder" title="Selected project folder" placeholder="Project folder">
   <button id="folder-button" type="button">Folders &amp; access</button>
   <button id="status" type="button">Status</button>
+  <button id="theme" type="button" aria-pressed="false" title="Switch between light and dark theme">Dark mode</button>
 </header>
 <main>
   <aside class="side" id="left" aria-label="Builders">
@@ -90,11 +96,14 @@ form button{height:44px;padding-inline:18px;background:var(--accent);color:hsl(v
     <div id="compose">
       <div id="typing" role="status" aria-live="polite"><span class="spinner"></span><span>Skipper is checking your request and contacting the right family member…</span></div>
       <div id="error" role="alert"></div>
+      <div id="chips" aria-live="polite"></div>
       <form id="chat">
+        <button id="attach-button" type="button" aria-label="Attach files" title="Attach files (or drag and drop, or paste)">📎</button>
+        <input id="file" type="file" multiple hidden>
         <textarea id="text" placeholder="What outcome do you want?" maxlength="8000" required></textarea>
         <button id="send" type="submit">Send</button>
       </form>
-      <div class="dim">Enter to send · Shift+Enter for a new line · “status” for the family’s health</div>
+      <div class="dim">Enter to send · Shift+Enter for a new line · 📎, drag-drop or paste to attach (10 MB) · “status” for the family’s health</div>
     </div>
   </section>
   <aside class="side" id="right" aria-label="Review, research and support">
@@ -129,11 +138,13 @@ form button{height:44px;padding-inline:18px;background:var(--accent);color:hsl(v
 <script>
 const $ = id => document.getElementById(id);
 const messages = $("messages");
-function bubble(role, text, ts) {
+function el(tag, text, cls) { const n = document.createElement(tag); if (text) n.textContent = text; if (cls) n.className = cls; return n; }
+function bubble(role, text, ts, files) {
   $("empty")?.remove();
   const item = document.createElement("article");
   item.className = "message " + role;
   item.append(document.createTextNode(text));
+  if (files && files.length) { const box = el("div", "", "files"); files.forEach(f => box.append(preview(f))); item.append(box); }
   if (ts) {
     const time = document.createElement("time");
     time.textContent = new Date(ts * 1000).toLocaleString();
@@ -167,7 +178,7 @@ function updateHealth(h) {
     $("health").append(e);
   };
   pill(active ? `${active} task${active === 1 ? "" : "s"} in progress` : "Ready for your next task");
-  pill(`Budget $${h.budget.spent.toFixed(2)} / $${h.budget.cap.toFixed(2)}`);
+  pill(`Est. spend today ${h.budget.spent > 0 && h.budget.spent < 0.01 ? "<$0.01" : "$" + h.budget.spent.toFixed(2)} / $${h.budget.cap.toFixed(2)}`);
   const builders = h.members.filter(member => member.builder);
   const support = h.members.filter(member => !member.builder);
   $("builders").replaceChildren(...builders.map(card));
@@ -237,7 +248,6 @@ function li(list, html, cls = "", limit = 80) {
   while (list.children.length > limit) list.lastChild.remove();
   return item;
 }
-const el = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if (cls) e.className = cls; return e; };
 function link(url, title) {
   const a = document.createElement("a");
   try { const u = new URL(url); if (!["http:", "https:"].includes(u.protocol)) return el("span", url); } catch { return el("span", url); }
@@ -249,11 +259,20 @@ function showRun(r) {
   const meta = el("span", `${r.id}${r.task ? " · task " + r.task : ""} · ${ago(r.started)}${r.ended ? "–" + ago(r.ended) : ""} · ${r.cwd}`, "meta");
   const parts = [el("b", hops + " "), el("span", r.status, "status-" + r.status), el("div", r.prompt), meta];
   if (r.output) parts.push(el("span", r.output.slice(-240), "meta"));
+  (r.commands || []).filter(c => c.status !== "read").forEach(c => {
+    const state = c.status === "blocked" ? "blocked: " + c.output : c.exit === null || c.exit === undefined ? "running" : `exit ${c.exit}${c.seconds != null ? " · " + c.seconds + "s" : ""}`;
+    const d = el("div", `$ ${c.command}  (${state})`, c.status === "blocked" || c.status === "failed" ? "warn" : "meta");
+    if (c.output && c.status !== "blocked") d.title = c.output.slice(-1000);
+    parts.push(d);
+  });
+  const reads = [...new Set((r.commands || []).flatMap(c => c.outside || []))];
+  if (reads.length) parts.push(el("div", "Permissions: read " + reads.join(", "), "meta"));
   document.querySelector(`#runs li[data-id="${r.id}"]`)?.remove();
   li($("runs"), parts).dataset.id = r.id;
 }
 function showSources(title, sources, ts) {
-  const parts = [el("b", title), el("span", ago(ts), "meta")];
+  const served = [...new Set(sources.map(s => s.provider).filter(Boolean))];
+  const parts = [el("b", title), el("span", (served.length ? "via " + served.join(", ") + " · " : "") + ago(ts), "meta")];
   if (!sources.length) parts.push(el("div", "No web sources returned."));
   sources.forEach(s => { const d = document.createElement("div"); d.append(link(s.url || s, s.title)); if (s.snippet) d.append(el("span", s.snippet, "meta")); parts.push(d); });
   li($("research"), parts, sources.length ? "" : "warn");
@@ -273,12 +292,14 @@ stream.onmessage = async e => {
   try {
     const event = JSON.parse(e.data), d = event.data, text = words[event.type]?.(d);
     if (event.type === "Run") showRun(d);
+    if (event.type === "Command") api("/api/runs?limit=50").then(rows => rows.filter(r => r.id === d.run).forEach(showRun)).catch(() => {});
     if (event.type === "Fallback") li($("activity"), [el("b", "CLI fallback "), el("span", `${d.failed} → ${d.to}: ${d.reason}`), el("span", ago(event.ts), "meta")], "warn");
     if (event.type === "Searched") showSources(`Search: ${d.query}`, d.sources || [], event.ts);
     if (event.type === "Finding" && (d.sources || []).length) showSources(`Finding ${d.id}: ${d.question || ""}`, d.sources, event.ts);
     if (event.type === "Activity") li($("activity"), [el("b", d.source + " "), el("span", d.text), el("span", ago(event.ts), "meta")], d.level);
     if (["Proposal", "Scouted", "Lesson", "Focus"].includes(event.type) && text) li($("activity"), [el("b", event.type + " "), el("span", text), el("span", ago(event.ts), "meta")]);
     if (event.type === "FolderApproved") await refreshFolders();
+    if (event.type === "Permission") { li($("activity"), [el("b", "Permissions "), el("span", d.text), el("span", ago(event.ts), "meta")]); bubble("event", "ℹ️ " + d.text + " (read-only)", event.ts); }
     if (text) bubble("event", text, event.ts);
     if (["Assigned", "ResearchRequest", "Finding", "Decision", "Applied", "ApplyPending", "Error", "Question", "HumanAnswer"].includes(event.type)) await refreshHealth();
     if (event.type === "FolderApprovalNeeded") await refreshFolders();
@@ -360,21 +381,63 @@ $("folder-request-form").addEventListener("submit", async e => {
     await refreshFolders();
   } catch (err) { $("error").textContent = err.message; }
 });
+// --- theme ---
+function setTheme(dark) {
+  if (dark) document.documentElement.dataset.theme = "dark"; else delete document.documentElement.dataset.theme;
+  $("theme").setAttribute("aria-pressed", String(dark)); $("theme").textContent = dark ? "Light mode" : "Dark mode";
+  try { localStorage.setItem("fam-theme", dark ? "dark" : "light"); } catch (e) {}
+}
+setTheme(document.documentElement.dataset.theme === "dark");
+$("theme").addEventListener("click", () => setTheme(document.documentElement.dataset.theme !== "dark"));
+// --- attachments ---
+let pending = [];
+function preview(f) {
+  const box = el("span", "", "file");
+  if (f.type.startsWith("image/") && f.blob) { const img = document.createElement("img"); img.src = f.blob; img.alt = f.name; box.append(img); }
+  box.append(document.createTextNode(`${f.name} · ${Math.max(1, Math.round(f.size / 1024))} KB`));
+  return box;
+}
+function drawChips() {
+  $("chips").replaceChildren(...pending.map((f, i) => {
+    const chip = el("span", "", "chip"); chip.append(preview(f));
+    const x = document.createElement("button"); x.type = "button"; x.textContent = "×"; x.setAttribute("aria-label", "Remove " + f.name);
+    x.onclick = () => { pending.splice(i, 1); drawChips(); }; chip.append(x); return chip;
+  }));
+}
+async function attach(files) {
+  for (const file of files) {
+    try {
+      $("error").textContent = "";
+      const r = await fetch("/api/upload", {method: "POST", headers: {"X-Fam-Token": TOKEN, "X-Filename": encodeURIComponent(file.name || "pasted.png"), "Content-Type": "application/octet-stream"}, body: file});
+      const meta = await r.json();
+      if (!r.ok) throw new Error(meta.detail || r.statusText);
+      if (meta.type.startsWith("image/")) meta.blob = URL.createObjectURL(file);
+      pending.push(meta); drawChips();
+    } catch (err) { $("error").textContent = `Could not attach ${file.name}: ${err.message}`; }
+  }
+}
+$("attach-button").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", e => { attach([...e.target.files]); e.target.value = ""; });
+$("compose").addEventListener("dragover", e => { e.preventDefault(); $("compose").classList.add("drag"); });
+$("compose").addEventListener("dragleave", () => $("compose").classList.remove("drag"));
+$("compose").addEventListener("drop", e => { e.preventDefault(); $("compose").classList.remove("drag"); attach([...e.dataTransfer.files]); });
+$("text").addEventListener("paste", e => { const files = [...(e.clipboardData?.files || [])]; if (files.length) { e.preventDefault(); attach(files); } });
 $("chat").addEventListener("submit", async e => {
   e.preventDefault();
   const text = $("text").value.trim();
   if (!text) return;
+  const sending = pending; pending = []; drawChips();
   $("send").disabled = true;
   $("text").disabled = true;
   $("typing").classList.add("visible");
   $("error").textContent = "";
-  bubble("user", text);
+  bubble("user", text, null, sending);
   try {
-    const result = await api("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,repo:$("repo").value.trim()})});
+    const result = await api("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,repo:$("repo").value.trim(),attachments:sending.map(f => f.id)})});
     result.messages.filter(m => m.role !== "user").forEach(m => bubble(m.role === "member" ? "member" : "skipper", m.text, m.ts));
     $("text").value = "";
     await refreshHealth();
-  } catch (err) { $("error").textContent = err.message; }
+  } catch (err) { $("error").textContent = err.message; pending = sending.concat(pending); drawChips(); }
   finally { $("typing").classList.remove("visible"); $("send").disabled = false; $("text").disabled = false; $("text").focus(); }
 });
 $("text").addEventListener("keydown", e => {

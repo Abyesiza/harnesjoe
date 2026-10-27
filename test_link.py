@@ -6,7 +6,7 @@ from link import SEEDS, Linker, config, ready
 
 
 def sv(name, desc, pkg="@x/y", ver="1.0.0", reg="npm", env=(), transport="stdio"):
-    return {"name": name, "description": desc, "version": ver, "packages": [{"registryType": reg, "identifier": pkg, "version": ver, "transport": {"type": transport}, "environmentVariables": [{"name": e} for e in env]}]}
+    return {"name": name, "description": desc, "version": ver, "repository": {"url": f"https://github.com/{name.split('/')[-1]}/{name.split('/')[-1]}"}, "packages": [{"registryType": reg, "identifier": pkg, "version": ver, "transport": {"type": transport}, "environmentVariables": [{"name": e} for e in env]}]}
 
 
 SQLITE = sv("io.github.a/sqlite-mcp", "query sqlite databases", "@a/sqlite-mcp", "2.0.1")
@@ -22,7 +22,7 @@ def linker(tmp_path, catalog=(), **kw):
             props.append(p)
 
     Sink(bus)
-    lk = Linker(bus, tmp_path / "env", find=lambda q: [x for x in catalog if q in x["name"]], **kw)
+    lk = Linker(bus, tmp_path / "env", find=lambda q: [x for x in catalog if q in x["name"]], **{"stars": lambda url: 42, **kw})
     lk.queue = []
     return bus, lk, props
 
@@ -133,3 +133,24 @@ def test_expert_briefs_seed_discovery_off_the_critical_path(tmp_path):
     assert lk.queue == ["sqlite"] and not props
     asyncio.run(bus.emit(Tick()))
     assert props and lk.queue == []
+
+
+def test_proposals_are_vetted_with_publisher_repo_stars_and_reason(tmp_path):
+    # Arrange
+    bus, lk, props = linker(tmp_path, [SQLITE])
+    # Act
+    asyncio.run(lk.fulfil("sqlite database", "t1"))
+    # Assert
+    p = lk.props["io.github.a/sqlite-mcp"]
+    assert p["publisher"] == "io.github.a" and p["repo"].startswith("https://github.com/") and p["stars"] == 42
+    assert "relevance" in p["why"] and not lk.trusted
+
+
+def test_proposals_without_a_source_repository_are_skipped(tmp_path):
+    # Arrange
+    bare = {**SQLITE, "repository": {}}
+    bus, lk, props = linker(tmp_path, [bare])
+    # Act
+    asyncio.run(lk.fulfil("sqlite database", "t1"))
+    # Assert
+    assert not lk.props and not props

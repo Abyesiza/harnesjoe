@@ -41,7 +41,7 @@ def test_persona_renders_its_voice_and_keeps_machine_output_exact():
 
 def test_mcp_flags_come_before_the_prompt_and_only_when_asked():
     a = ClaudeCode(Persona("T", "m"), None, "claude-haiku-5-5")
-    assert a.argv("p", "/tmp/c.json") == ["claude", "-p", "--model", "claude-haiku-5-5", "--strict-mcp-config", "--mcp-config", "/tmp/c.json", "p"]
+    assert a.argv("p", "/tmp/c.json") == ["claude", "-p", "--model", "claude-haiku-5-5", "--strict-mcp-config", "--mcp-config", "/tmp/c.json", "--", "p"]
     assert "--mcp-config" not in a.argv("p")
 
 
@@ -146,7 +146,7 @@ def test_a_need_is_met_by_a_trusted_server_and_the_task_continues(tmp_path):
 def test_an_unmet_need_blocks_cleanly_with_a_proposal_and_no_leftovers(tmp_path):
     bus = Bus()
     impl = Fake("NEED: sqlite database")
-    lk = Linker(bus, tmp_path / "lk", find=lambda q: [SQLITE] if q == "sqlite" else [])
+    lk = Linker(bus, tmp_path / "lk", find=lambda q: [SQLITE] if q == "sqlite" else [], stars=lambda url: 1)
     lk.queue = []
     blocked = watch(bus, Blocked, Output, Decision)
     brain, seen, panel = family(bus, [.9], tmp_path, {"a": impl}, linker=lk)

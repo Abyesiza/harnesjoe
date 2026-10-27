@@ -1,4 +1,5 @@
 import asyncio
+import time
 import json
 import os
 from collections import Counter
@@ -7,10 +8,47 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol
 
-from core import ACCESS, Access, Correction, Lesson, Node, jsonin, on, sh
+import shellpolicy
+import sys
+import uuid
+from contextvars import ContextVar
+
+import logging
+import re
+
+from core import ACCESS, Access, Correction, Lesson, Node, jsonin, on, sh, sh_split
+
+log = logger = logging.getLogger("fam.agents")
 from mind import enc
 
 PRICE = {"claude-haiku-5-5": 0.10, "claude-sonnet-5-5": 2.0, "claude-opus-5-5": 4.0}
+
+
+STRICT_JSON = "Your previous reply could not be parsed. Reply with exactly one JSON object and nothing else: no prose, no code fences, no second object."
+# CLI diagnostics that must never reach a user-facing reply (they are logged instead).
+WARNING = re.compile(r"^(Permission (deny|allow) rule\b.*|Warning:.*|.*mixes \* with the trailing :\* prefix syntax.*|.*matches no known tool.*)$")
+
+
+GUARD_TIMEOUT = 20  # seconds; the default hook timeout is 10 minutes, so a stuck guard would stall the job
+
+
+def strip_warnings(out: str) -> tuple[str, list[str]]:
+    """Split CLI warning lines from the model's answer."""
+    keep: list[str] = []
+    warned: list[str] = []
+    for line in out.splitlines():
+        (warned if WARNING.match(line.strip()) else keep).append(line)
+    return "\n".join(keep).strip("\n"), warned
+
+
+def short_reason(cli: str, rc: int, err: str, out: str) -> str:
+    """A short, human reason for a failed CLI call: the last meaningful stderr line, never the model's plan text."""
+    lines = [l.strip() for l in err.splitlines() if l.strip() and not WARNING.match(l.strip())]
+    if lines:
+        return f"{cli} exited with {rc}: {lines[-1][:200]}"
+    tail = [l.strip() for l in out.splitlines() if l.strip()]
+    hint = next((l for l in reversed(tail) if re.search(r"(?i)error|denied|blocked|limit|not found|invalid|timed? ?out", l)), "")
+    return f"{cli} exited with {rc}" + (f": {hint[:200]}" if hint else " (no error message; see the run log)")
 
 
 class OverBudget(Exception):
@@ -22,11 +60,30 @@ class AgentError(ValueError):
 
 
 class Ledger:
+    """Estimated spend (tokens ≈ characters / 4) against a daily cap. Persisted when attached to a
+    file, so a restart no longer resets the figure to $0; a new local day starts from zero."""
+
     def __init__(s, cap):
-        s.cap, s.spent = cap, 0.0
+        s.cap, s.spent, s.path, s.day = cap, 0.0, None, time.strftime("%Y-%m-%d")
+
+    def attach(s, path) -> None:
+        s.path = Path(path)
+        try:
+            data = json.loads(s.path.read_text())
+            if data.get("day") == s.day:
+                s.spent = float(data.get("spent", 0.0))
+        except (OSError, ValueError, TypeError):
+            pass
 
     def charge(s, price, tin, tout):
+        if (today := time.strftime("%Y-%m-%d")) != s.day:
+            s.day, s.spent = today, 0.0
         s.spent += (tin + 5 * tout) * price / 1e6
+        if s.path:
+            try:
+                s.path.write_text(json.dumps({"day": s.day, "spent": s.spent}))
+            except OSError as e:
+                log.warning("could not save the budget ledger: %s", e)
 
     @property
     def over(s):
@@ -83,6 +140,45 @@ class Tracker(Protocol):
     def start(self, cli: str, cwd: str, prompt: str) -> str: ...
     def finish(self, run_id: str, status: str, output: str, cli: str = "") -> None: ...
     def fallback(self, run_id: str, failed: str, to: str, reason: str) -> None: ...
+    def command(self, run_id: str, entry: dict) -> None: ...
+
+
+CURRENT_RUN: ContextVar[str] = ContextVar("fam_run", default="")
+GUARD = Path(__file__).resolve().with_name("famguard.py")
+
+
+def guard_settings() -> str:
+    matcher = "Bash|Read|Glob|Grep|LS|Edit|Write|MultiEdit|NotebookEdit"
+    """Claude settings JSON that routes every Bash call through famguard.py before and after it runs."""
+    hook = lambda stage: [{"matcher": matcher, "hooks": [{"type": "command", "command": f"{shlex_quote(sys.executable)} {shlex_quote(str(GUARD))} {stage}", "timeout": GUARD_TIMEOUT}]}]  # noqa: E731
+    return json.dumps({"hooks": {"PreToolUse": hook("pre"), "PostToolUse": hook("post")}})
+
+
+def shlex_quote(s: str) -> str:
+    import shlex
+
+    return shlex.quote(s)
+
+
+def merge_commands(lines: list[dict]) -> list[dict]:
+    """Pair hook pre/post records into one entry per command: folder, command, exit code, duration, output."""
+    out: dict[str, dict] = {}
+    for i, e in enumerate(lines):
+        key = e.get("use") or f"n{i}"
+        row = out.setdefault(key, {"command": e.get("command", ""), "cwd": e.get("cwd", ""), "started": e.get("ts"), "exit": None, "output": "", "status": "running", "outside": []})
+        row["outside"] = list(dict.fromkeys([*row["outside"], *e.get("outside", [])]))
+        if e.get("tool") and e.get("allowed", True):  # a file read outside the approved folders: no post record follows
+            row.update(status="read", ended=e.get("ts"))
+        if e.get("stage") == "pre" and not e.get("allowed", True):
+            row.update(status="blocked", output=e.get("reason", ""), exit=None, ended=e.get("ts"))
+        elif e.get("stage") == "post":
+            row.update(exit=e.get("exit"), output=str(e.get("output", ""))[-1000:], ended=e.get("ts"), status="done" if e.get("exit") in (0, None) else "failed")
+            if row.get("started") is None:
+                row["started"] = e.get("ts")
+    for row in out.values():
+        if row.get("ended") and row.get("started"):
+            row["seconds"] = round(row["ended"] - row["started"], 2)
+    return list(out.values())
 
 
 class Agent:
@@ -102,7 +198,7 @@ class Agent:
     def cli(s) -> str:
         return s.cmd[0] if s.cmd else type(s).__name__.lower()
 
-    def argv(s, prompt: str, mcp: str | None = None) -> list[str]:
+    def argv(s, prompt: str, mcp: str | None = None, shell: str | None = None) -> list[str]:
         return [*s.cmd, *s.access_args(ACCESS.get()), prompt]
 
     def access_args(s, access: Access) -> list[str]:
@@ -114,26 +210,67 @@ class Agent:
 
     async def once(s, text: str, cwd: str = ".", mcp: str | None = None) -> str:
         prompt = s.prompt(text)
-        argv = [*s.wrap, *s.argv(prompt, mcp)]
+        access = ACCESS.get()
+        mode = shellpolicy.mode(access.readonly, access.untrusted)
+        dirs = [str(Path(d).resolve()) for d in (cwd, *access.dirs)]
+        home = Path(os.environ.get("FAM_HOME", Path.home() / ".fam")).expanduser() / "shell"
+        home.mkdir(parents=True, exist_ok=True)
+        log = home / f"{CURRENT_RUN.get() or 'adhoc'}-{uuid.uuid4().hex[:6]}.jsonl"
+        env = {**os.environ, "FAM_GUARD_DIRS": os.pathsep.join(dirs), "FAM_GUARD_MODE": mode, "FAM_RUN_LOG": str(log)}
+        argv = [*s.wrap, *s.argv(prompt, mcp, mode)]
+        tail = asyncio.create_task(s.follow(log, CURRENT_RUN.get()))
         async with s.sem:
             try:
-                rc, out = await sh(*argv, cwd=cwd, timeout=s.timeout)
+                rc, out, err = await sh_split(*argv, cwd=cwd, timeout=s.timeout, env=env)
             except TimeoutError as e:
                 raise AgentError(f"{s.cli} timed out after {s.timeout:.0f}s") from e
             except OSError as e:
                 raise AgentError(f"could not start {s.cli}: {e}") from e
+            finally:
+                tail.cancel()
+                await s.flush(log, CURRENT_RUN.get())
+        out, warned = strip_warnings(out)
+        for line in [*warned, *err.splitlines()]:
+            if line.strip():
+                logger.warning("%s: %s", s.cli, line.strip()[:300])
         if rc:
-            raise AgentError(out.strip()[-500:] or f"{s.cli} exited with {rc}")
+            raise AgentError(short_reason(s.cli, rc, err, out))
         if not out.strip():
             raise AgentError(f"{s.cli} returned no output")
         s.ledger.charge(s.price, len(prompt) / 4, len(out) / 4)
         return out
+
+    async def follow(s, log: Path, run_id: str) -> None:
+        """Stream hook records to the tracker while the CLI is still running."""
+        seen = 0
+        while True:
+            await asyncio.sleep(1)
+            seen = s.emit(log, run_id, seen)
+
+    async def flush(s, log: Path, run_id: str) -> None:
+        s.emit(log, run_id, 0, final=True)
+        log.unlink(missing_ok=True)
+
+    def emit(s, log: Path, run_id: str, seen: int, final: bool = False) -> int:
+        if not log.exists() or not Agent.tracker or not run_id:
+            return seen
+        lines = []
+        for raw in log.read_text().splitlines():
+            try:
+                lines.append(json.loads(raw))
+            except ValueError:
+                continue
+        if final or len(lines) > seen:
+            for row in merge_commands(lines):
+                Agent.tracker.command(run_id, {**row, "cli": s.cli, "agent": s.persona.name})
+        return len(lines)
 
     async def ask(s, text: str, cwd: str = ".", mcp: str | None = None) -> str:
         if s.ledger.over:
             raise OverBudget(s.ledger.spent)
         tracker = Agent.tracker
         run_id = tracker.start(s.cli, str(cwd), text) if tracker else ""
+        CURRENT_RUN.set(run_id)
         chain = [s, *s.fallbacks]
         for i, agent in enumerate(chain):
             try:
@@ -152,13 +289,19 @@ class Agent:
         raise AgentError("no agent configured")
 
     async def ask_json(s, text: str, cwd: str = ".", mcp: str | None = None) -> dict:
-        return jsonin(await s.ask(text, cwd, mcp))
+        out = await s.ask(text, cwd, mcp)
+        try:
+            return jsonin(out)
+        except ValueError:
+            # One retry with a stricter instruction; a second failure is a real error.
+            log.warning("%s returned no parseable JSON; retrying once", s.cli)
+            return jsonin(await s.ask(f"{text}\n\n{STRICT_JSON}", cwd, mcp))
 
 
 # Inspection-only tools pre-approved for read-only jobs so `-p` never stalls on a permission prompt.
 READ_SHELL = ("ls", "cd", "pwd", "cat", "head", "tail", "tree", "du", "wc", "stat", "file", "git status", "git log", "git branch", "git diff", "git remote", "git show", "git rev-parse")
 CLAUDE_READ = ("Read", "Glob", "Grep", "LS", *(f"Bash({c}:*)" for c in READ_SHELL), "Bash(git -C:*)")
-CLAUDE_WRITE = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+CLAUDE_WRITE = ("Edit", "Write", "NotebookEdit")
 
 
 class ClaudeCode(Agent):
@@ -170,24 +313,37 @@ class ClaudeCode(Agent):
             out += ["--allowedTools", *CLAUDE_READ, "--disallowedTools", *CLAUDE_WRITE]
         return out
 
-    def argv(s, prompt, mcp=None):
+    def argv(s, prompt, mcp=None, shell=None):
         return [
             *s.cmd,
             *(["--model", s.model] if s.model else []),
             *(["--strict-mcp-config", "--mcp-config", mcp] if mcp else []),
-            *(access := s.access_args(ACCESS.get())),
+            *(access := s.shell_args(ACCESS.get(), shell) if shell else s.access_args(ACCESS.get())),
             # Variadic flags such as --allowedTools would otherwise swallow the prompt.
-            *(["--"] if access else []),
+            "--",
             prompt,
         ]
+
+
+    def shell_args(s, access: Access, shell: str) -> list[str]:
+        # Broad reads: the home folder is visible to Read/Glob/Grep; the guard hook refuses secrets and
+        # keeps Edit/Write inside the approved folders, and reports reads outside them.
+        dirs = dict.fromkeys([*access.dirs, *([str(Path.home())] if shell != "off" else [])])
+        return [*(a for d in dirs for a in ("--add-dir", d)), *shellpolicy.claude_flags(shell, guard_settings())]
 
 
 class Copilot(Agent):
     cmd = ("copilot", "-p")
 
-    def argv(s, prompt: str, mcp: str | None = None) -> list[str]:
-        # -p takes the prompt as its value; options follow it.
-        return [*s.cmd, prompt, *s.access_args(ACCESS.get())]
+    def argv(s, prompt: str, mcp: str | None = None, shell: str | None = None) -> list[str]:
+        # -p takes the prompt as its value; options follow it. Copilot keeps its own path checks
+        # (cwd plus --add-dir), so files outside the approved folders stay out of reach.
+        access = ACCESS.get()
+        if shell:
+            # Copilot has no hooks, so broad reads are only opened in read-only modes where it cannot write.
+            dirs = dict.fromkeys([*access.dirs, *([str(Path.home())] if shell in ("readonly", "inspect") else [])])
+            return [*s.cmd, prompt, *(a for d in dirs for a in ("--add-dir", d)), *shellpolicy.copilot_flags(shell)]
+        return [*s.cmd, prompt, *s.access_args(access)]
 
     def access_args(s, access: Access) -> list[str]:
         out = [a for d in access.dirs for a in ("--add-dir", d)]
