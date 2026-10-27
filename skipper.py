@@ -1,4 +1,6 @@
+import asyncio
 import json
+import os
 import re
 import sqlite3
 import time
@@ -6,11 +8,11 @@ import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-from core import ACCESS, Access, Approve, HumanAnswer, ResearchRequest, Task
+from core import ACCESS, Access, Approve, Consulted, HumanAnswer, ResearchRequest, Task
 from link import ready
 
-INTENTS = {"task", "status", "member_chat", "answer_question", "research", "focus", "teach", "approve_tool", "answer"}
-LIMITS = {"intent": 40, "task": 8000, "member": 40, "reply": 4000, "name": 200}
+INTENTS = {"task", "status", "member_chat", "answer_question", "research", "focus", "teach", "approve_tool", "answer", "consult"}
+LIMITS = {"intent": 40, "task": 8000, "member": 120, "reply": 4000, "name": 200}
 SYSTEM = {"/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var", "/home", "/snap", "/mnt", "/media"}
 SENSITIVE = {".ssh", ".gnupg", ".aws", ".kube", ".password-store", ".fam"}
 QUOTED = re.compile(r"[\"'`“”‘’]((?:~|/)[^\"'`“”‘’\n]+)[\"'`“”‘’]")
@@ -39,6 +41,9 @@ def safe_folder(raw: str) -> Path:
         raise ValueError(f"{path} is not an accessible directory.")
     if str(path) in SYSTEM or path == Path.home().resolve():
         raise ValueError(f"{path} is too broad or a system folder; choose a project folder inside it.")
+    work = Path(os.environ.get("FAM_HOME", Path.home() / ".fam")).expanduser().resolve() / "work"  # task worktrees hold no secrets
+    if work in path.parents:
+        return path
     if any(part in SENSITIVE for part in path.parts) or any(str(path).startswith(s + "/") for s in SYSTEM - {"/", "/home", "/tmp", "/mnt", "/media", "/srv", "/opt"}):
         raise ValueError(f"{path} is a protected location.")
     return path
@@ -110,6 +115,7 @@ def lobby() -> str:
 
 
 JOB_ID = re.compile(r"\b([0-9a-f]{8})\b")
+CONSULT_ASK = re.compile(r"\b(verif\w*|test\w*|review|validate|audit|confirm|double-check)\b", re.I)
 FOUND = re.compile(r"\bwhat (?:did |has |have )?(\w+) (?:find|found|say|said|conclude|concluded|report|reported)\b", re.I)
 MODEL_Q = re.compile(r"\b(?:which|what) (?:model|llm|cli)s?\b.*?\b(?:does|do|is|for|of)\s+(\w+)|\b(\w+)(?:'s|’s) model\b", re.I)
 LOCAL_HINT = re.compile(r"\b(project|folder|foldr|repo|repository|codebase|directory|dir)\b", re.I)
@@ -152,7 +158,8 @@ PLAN = (
     "You are Skipper, the user's conversational chief of staff for an autonomous software family. "
     "Classify the request and decide the next safe step. Only assign implementation work after the user asks for a concrete software outcome. "
     "Questions should be answered directly. Do not invent that work, tests, or approvals happened. "
-    "Choose only one intent: task, status, member_chat, answer_question, research, focus, teach, approve_tool, or answer. "
+    "Choose only one intent: task, status, member_chat, answer_question, research, focus, teach, approve_tool, answer, or consult. "
+    "Use consult when a task needs help, verification, testing or review from any family members: put their keys comma-separated in member, what to check in task, and the task id in name when known. They work in the background and Skipper reports their findings. "
     "Every task listed under a member's running list is active at the same time; a new message never pauses or replaces them, and you can answer about any of them. "
     "For tasks choose a builder by capability and current active workload, or leave member empty for automatic routing. "
     "For member_chat choose any family member by key. For approve_tool provide the exact existing proposal name. "
@@ -594,6 +601,37 @@ class Skipper:
             return f"{app.cast[key].persona.name} has no task in progress right now.", dirs
         return f"{app.cast[key].persona.name}'s current tasks (you are working on these; answer questions about them from this list):\n" + "\n".join(lines), dirs
 
+    def consult_plan(s, app, members: str, repo: str, task_id: str) -> tuple[list[str], str, str]:
+        keys = [k for k in dict.fromkeys(re.findall(r"[a-z]+", members.lower())) if k in app.cast]
+        if not keys:
+            raise ValueError("Tell me which family member to ask, for example “ask Vera to verify task 1234abcd”.")
+        tree = app.lead.root / "work" / task_id if task_id else None
+        found = task_id if tree and tree.is_dir() else ""
+        return keys, str(tree) if found else repo, found
+
+    async def consult(s, app, keys: list[str], ask: str, cwd: str, task_id: str) -> None:
+        """Members work in parallel in the task's worktree; each finding is reported to the user as it arrives."""
+        text = app.lead.tasks.get(task_id, "") if task_id else ""
+
+        async def one(key):
+            agent = app.cast[key]
+            prompt = (
+                f"Skipper asked you, {agent.persona.name}, to help verify work. Run whatever tests or checks you need "
+                "(pytest, lint, typecheck, build, a browser pass) but do not change source files. "
+                "Report briefly: what you ran, the results, and any problems with how to fix them.\n"
+                f"{'Task under review: ' + text + chr(10) if text else ''}Request: {ask}"
+            )
+            token = ACCESS.set(Access((cwd,)))
+            try:
+                out = (await agent.ask(prompt, cwd)).strip()
+            except Exception as e:  # noqa: BLE001 - always report back, even a failure
+                out = f"I could not finish: {type(e).__name__}: {e}"[:500]
+            finally:
+                ACCESS.reset(token)
+            await app.bus.emit(Consulted(task_id or uuid.uuid4().hex[:8], key, ask, out[:4000]))
+
+        await asyncio.gather(*(one(k) for k in keys))
+
     def no_folder_reply(s, text: str) -> str:
         return ("That sounds like a local project, but I couldn’t find a matching folder in the approved folders or the usual "
                 "project locations, so I haven’t started a web search. Send me its full path (for example /home/you/Projects/name).")
@@ -756,6 +794,13 @@ class Skipper:
             prefix = re.match(rf"^(?:ask|tell|talk to)\s+{re.escape(agent.persona.name)}\s*[:,]?\s*", text, re.IGNORECASE)
             if prefix:
                 ask = text[prefix.end():].strip() or text
+                if CONSULT_ASK.search(ask):
+                    task_id = (re.search(r"\b([0-9a-f]{8}\+*)(?![\w+])", ask) or [None, ""])[1]
+                    keys, cwd, found = s.consult_plan(app, agent.persona.name, repo, task_id)
+                    enqueue(s.consult(app, keys, ask, cwd, found), found)
+                    reply = f"I’ve asked {agent.persona.name} to check this in the background and I’ll report the findings here when they’re done."
+                    assistant = s.store.message("skipper", reply, found or None)
+                    return {"reply": reply, "task": found or None, "messages": [user, assistant]}
                 context, trees = s.member_context(app, key)
                 prompt = f"Answer the user conversationally as {agent.persona.name}. You may run read-only inspection commands. Do not edit files or start implementation work.\n{context}\nUser: {ask}"
                 reply = await read_only(agent, prompt, lobby(), [*s.folders_for(text), *trees])
@@ -814,6 +859,14 @@ class Skipper:
             reply = await read_only(app.cast[member], prompt, lobby(), [*s.folders_for(text), *trees])
             assistant = s.store.message("member", f"{app.cast[member].persona.name}: {reply}")
             return {"reply": assistant["text"], "task": None, "messages": [user, assistant]}
+        elif intent == "consult":
+            task_id = str(plan.get("name", "")).strip()
+            keys, cwd, found = s.consult_plan(app, str(plan.get("member", "")), repo, task_id)
+            enqueue(s.consult(app, keys, str(plan.get("task") or text), cwd, found), found)
+            names = ", ".join(app.cast[k].persona.name for k in keys)
+            reply = reply or f"I’ve asked {names} to check this in the background and I’ll report their findings here when they’re done."
+            assistant = s.store.message("skipper", reply, found or None)
+            return {"reply": reply, "task": found or None, "messages": [user, assistant]}
         elif intent == "answer_question":
             pending = {
                 question["task"]["id"]: question

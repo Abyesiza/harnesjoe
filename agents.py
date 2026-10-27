@@ -298,6 +298,9 @@ class Agent:
 READ_SHELL = ("ls", "cd", "pwd", "cat", "head", "tail", "tree", "du", "wc", "stat", "file", "git status", "git log", "git branch", "git diff", "git remote", "git show", "git rev-parse")
 CLAUDE_READ = ("Read", "Glob", "Grep", "LS", *(f"Bash({c}:*)" for c in READ_SHELL), "Bash(git -C:*)")
 CLAUDE_WRITE = ("Edit", "Write", "NotebookEdit")
+# Primary-source lookups for research; withheld when reviewing untrusted code.
+WEB_SHELL = ("gh search", "gh api", "gh repo view", "gh release view")
+CLAUDE_WEB = ("WebSearch", "WebFetch", *(f"Bash({c}:*)" for c in WEB_SHELL))
 
 
 class ClaudeCode(Agent):
@@ -306,7 +309,7 @@ class ClaudeCode(Agent):
     def access_args(s, access: Access) -> list[str]:
         out = [a for d in access.dirs for a in ("--add-dir", d)]
         if access.readonly:
-            out += ["--allowedTools", *CLAUDE_READ, "--disallowedTools", *CLAUDE_WRITE]
+            out += ["--allowedTools", *CLAUDE_READ, *([] if access.untrusted else CLAUDE_WEB), "--disallowedTools", *CLAUDE_WRITE]
         return out
 
     def argv(s, prompt, mcp=None, live=False):
@@ -335,6 +338,6 @@ class Copilot(Agent):
     def access_args(s, access: Access) -> list[str]:
         out = [a for d in access.dirs for a in ("--add-dir", d)]
         if access.readonly:
-            out += [a for c in READ_SHELL for a in ("--allow-tool", f"shell({c})")]
+            out += [a for c in (*READ_SHELL, *([] if access.untrusted else WEB_SHELL)) for a in ("--allow-tool", f"shell({c})")]
             out += ["--deny-tool", "write"]
         return out

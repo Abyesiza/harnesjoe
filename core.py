@@ -163,6 +163,14 @@ class Said:
 
 
 @dataclass
+class Consulted:
+    id: str  # the task id the findings belong to, or the consult id
+    member: str
+    ask: str
+    findings: str
+
+
+@dataclass
 class Tossed:
     task: Task
     to: str

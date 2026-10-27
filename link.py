@@ -57,7 +57,7 @@ class Linker(Node):
         super().__init__(bus)
         s.stars, s.relevance = stars, relevance
         s.root, s.find, s.auto, s.keep, s.retire, s.floor = Path(root), find, auto, keep, retire, floor
-        s.path, s.used = s.root / "mcp.json", {}
+        s.path, s.used, s.asked = s.root / "mcp.json", {}, set()
         d = json.loads(s.path.read_text()) if s.path.exists() else {"queue": list(SEEDS)}
         s.trusted, s.props, s.queue, s.dead = d.get("trusted", {}), d.get("props", {}), d.get("queue", []), d.get("dead", [])
 
@@ -140,11 +140,13 @@ class Linker(Node):
     async def fulfil(s, need, tid):
         names = s.match(need)
         if not names:
+            s.asked.add(need)
             hits = await s.search(need)
             if hits:
                 await s.propose(need, hits)
-                if s.auto and s.trust(hits[0]["name"]):
-                    names = s.match(need)
+                if s.auto:
+                    s.trust(hits[0]["name"])
+                names = s.match(need)
         if names:
             s.used[tid] = names
             return s.write(names)

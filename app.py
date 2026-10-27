@@ -35,6 +35,7 @@ from family import Advisor, Gate, Judge, Lead, Panel, Researcher, Suite
 from link import Linker
 from mind import Brain
 from scout import Scout
+from steward import Steward
 
 BUILD = "Write the least code that satisfies the task. Delete before adding. Extend existing base classes. No comments. If essential user input is missing, do not guess: reply only ASK_USER: <one concise question>."
 CHECKS = ("no duplicated logic", "smallest diff")
@@ -146,6 +147,7 @@ def build(root=None, apply_accepted=False):
     expert = Expert(bus, cast["sage"], cast["hawk"], root / "briefs.npz")
     lead = Lead(bus, members, Brain(list(members), path=root / "router.npz"), root, cast, expert, linker, apply_accepted=apply_accepted)
     Suite(bus)
+    Steward(bus, captain, lead, linker)
     Panel(bus, "Vera", cast["vera"])
     Panel(bus, "Bastion", cast["bastion"], True)
     Panel(bus, "Dash", cast["dash"])

@@ -86,13 +86,18 @@ class Feed:
             "ApplyPending": lambda d: f"Task {d['task']['id']}: {d['reason']} Worktree: {d['task']['cwd']}",
             "HumanDecision": lambda d: f"You chose to {'accept' if d['accept'] else 'reject'} task {d['task']['id']}.",
             "Question": lambda d: f"{d['member']} needs your input on task {d['task']['id']}: {d['text']}",
-            "HumanAnswer": lambda d: f"You answered the family’s question on task {d['task']['id']}.",
+            "HumanAnswer": lambda d: (
+                f"Skipper answered the family’s question on task {d['task']['id']} for you."
+                if d["answer"].startswith("(Skipper")
+                else f"You answered the family’s question on task {d['task']['id']}."
+            ),
             "Error": lambda d: (
                 f"Task {d.get('task', '')} was interrupted by a Skipper restart. Its worktree is preserved; send “resume task {d.get('task', '')}” to continue."
                 if d["message"].startswith("Work was interrupted by a Skipper restart.")
                 else f"Task {d.get('task', '')} needs attention: {d['message']}"
             ),
             "Said": lambda d: f"{d['name']}: {d['text']}",
+            "Consulted": lambda d: f"{d['member'].title()} reported back on “{d['ask'][:120]}” (task {d['id']}):\n{d['findings']}",
         }
         if kind in summaries or kind in ("Finding", "Scouted"):
             s.store.message("skipper", s.report(kind, data, summaries), task_id or data.get("id") or None)
