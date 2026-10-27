@@ -66,7 +66,7 @@ class Scout(Node):
                 shutil.copytree(dst / k, s.root / "skills" / dst.name / k, dirs_exist_ok=True)
             for l in lessons:
                 await s.bus.emit(Lesson(l))
-        await s.bus.emit(Scouted(r["full_name"], score, skills, lessons, str(v.get("say", ""))))
+        await s.bus.emit(Scouted(r["full_name"], score, skills, lessons, str(v.get("say", "")), score >= s.floor))
         return score
 
     @on(Focus)

@@ -8,6 +8,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 /.fam/
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
 *.log
 *.pid
 *.sqlite3

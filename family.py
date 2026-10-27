@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import re
+import sys
 from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
@@ -15,7 +17,9 @@ from core import (
     ApplyPending,
     Assigned,
     Blocked,
+    Consulted,
     Decision,
+    Feedback,
     Finding,
     Green,
     HumanDecision,
@@ -42,7 +46,7 @@ RUBRIC = (
     "search for evidence against the leading option, resolve conflicts. "
     'Reply only {"candidates": {"<option>": <confidence 0..1>}, "gaps": ["<open issue>"], "sources": ["<url you relied on>"], "say": "<one short line in your voice>", "done": <true when no open gaps remain and the answer is settled>}.'
 )
-REVIEW = 'Review the working tree changes without editing anything. Reply only {"accept": <0..1>, "say": "<one short line in your voice>"}.'
+REVIEW = 'Review the working tree changes without editing anything. Reply only {"accept": <0..1>, "fixes": ["<specific thing the builder must change>"], "say": "<one short line in your voice>"}.'
 IDEA = 'Look at the working tree changes without editing anything. Reply only {"idea": "<one imperative sentence from your lens>", "say": "<one short line in your voice>"}.'
 NEED = " If you cannot proceed without an external tool or data source, reply only 'NEED: <capability in a few words>'."
 WRAP = " End with one short line on what you did, in your voice."
@@ -57,13 +61,17 @@ def flow_of(text):
 
 
 class Lead(Node):
-    def __init__(s, bus, members, brain, root, crew=None, expert=None, linker=None, lam=0.75, tries=3, apply_accepted=False):
+    def __init__(s, bus, members, brain, root, crew=None, expert=None, linker=None, lam=0.75, tries=3, apply_accepted=False, fix_rounds=3):
         super().__init__(bus)
         s.members, s.brain, s.root, s.crew, s.expert, s.linker = members, brain, Path(root), crew or {}, expert, linker
         s.lam, s.tries, s.top, s.lock, s.apply_lock, s.apply_accepted = lam, tries, max(m.price for m in members.values()), asyncio.Lock(), asyncio.Lock(), apply_accepted
         s.active = defaultdict(set)
         s.completed, s.reward = defaultdict(int), defaultdict(float)
         s.tasks = {}
+        # Shared notebook: notes per task, the advice each was given, its folder, and per-folder locks for in-place work.
+        s.board, s.seen, s.advice, s.where = defaultdict(list), defaultdict(int), {}, {}
+        s.warned, s.folders = set(), {}
+        s.rounds, s.climbs, s.ballots, s.fix_rounds = defaultdict(int), defaultdict(int), defaultdict(list), fix_rounds
 
     def select(s, text):
         x = enc(text)
@@ -82,17 +90,42 @@ class Lead(Node):
             return await sh("git", *args, cwd=cwd)
 
     async def workspace(s, t):
+        if not Path(t.cwd).is_dir():
+            raise RuntimeError(f"{t.cwd} is not a folder")
+        rc, _ = await s.git("rev-parse", "--git-dir", cwd=t.cwd)
+        if rc:  # not a git repository: work in the folder itself
+            return t.cwd
         wt = str(s.root / "work" / t.id)
         rc, out = await s.git("worktree", "add", "-q", "-b", f"fam/{t.id}", wt, cwd=t.cwd)
         if rc:
             raise RuntimeError(out)
         return wt
 
+    @staticmethod
+    def direct(t):
+        return bool(t.repo) and Path(t.cwd).resolve() == Path(t.repo).resolve()
+
+    async def home(s, t):
+        """Where a preserved task's work lives: its folder when it ran in place, else its worktree."""
+        if s.direct(t):
+            return t.cwd
+        worktree = s.root / "work" / t.id
+        rc, branch = await s.git("branch", "--show-current", cwd=worktree)
+        if rc or branch.strip() != f"fam/{t.id}":
+            raise RuntimeError(f"the preserved worktree for task {t.id} is unavailable or has changed")
+        return str(worktree)
+
     async def discard(s, t):
+        if s.direct(t):
+            return
         await s.git("worktree", "remove", "--force", t.cwd, cwd=t.repo)
         await s.git("branch", "-D", f"fam/{t.id}", cwd=t.repo)
 
     async def apply(s, t):
+        if s.direct(t):
+            s.tasks.pop(t.id, None)
+            await s.bus.emit(Applied(t, t.repo))
+            return
         async with s.apply_lock:
             await s.apply_one(t)
 
@@ -109,27 +142,20 @@ class Lead(Node):
         if patch_rc or not patch.strip():
             await s.bus.emit(ApplyPending(t, "The accepted worktree has no applicable patch; it remains available for inspection."))
             return
-        rc, status = await s.git("status", "--porcelain", cwd=t.repo)
-        if rc or status.strip():
+        rc, _ = await sh("git", "apply", "--check", "-", cwd=t.repo, input=patch)
+        if rc:
             reverse_rc, _ = await sh("git", "apply", "--reverse", "--check", "-", cwd=t.repo, input=patch)
-            if not reverse_rc:
+            if not reverse_rc:  # already in the folder
                 await s.discard(t)
                 s.tasks.pop(t.id, None)
                 await s.bus.emit(Applied(t, t.repo))
                 return
-            await s.bus.emit(ApplyPending(t, "Your repository has uncommitted changes; I left the accepted work in its isolated worktree."))
-            return
-        rc, base = await s.git("rev-parse", "HEAD", cwd=t.repo)
+        # Plain apply works on the working tree even when the user has uncommitted edits; 3-way merges when the files moved on.
+        rc, out = await sh("git", "apply", "-", cwd=t.repo, input=patch)
         if rc:
-            await s.bus.emit(ApplyPending(t, "I could not verify the repository revision, so I left the work isolated."))
-            return
-        rc, branch_base = await s.git("merge-base", "HEAD", f"fam/{t.id}", cwd=t.repo)
-        if rc or branch_base.strip() != base.strip():
-            await s.bus.emit(ApplyPending(t, "The repository changed while I worked; I left the accepted work isolated to avoid overwriting newer changes."))
-            return
-        rc, out = await sh("git", "apply", "--3way", "-", cwd=t.repo, input=patch)
+            rc, out = await sh("git", "apply", "--3way", "-", cwd=t.repo, input=patch)
         if rc:
-            await s.bus.emit(ApplyPending(t, f"Git could not safely apply the accepted patch; it remains in the worktree. {out.strip()[:300]}"))
+            await s.bus.emit(ApplyPending(t, f"The changes conflict with edits already in {t.repo}, so they stay in the worktree for now. {out.strip()[:300]}"))
             return
         await s.discard(t)
         s.tasks.pop(t.id, None)
@@ -138,15 +164,77 @@ class Lead(Node):
     async def advise(s, t):
         return await s.expert.brief(t) if s.expert else {}
 
+    def tell(s, task_id, source, text):
+        """Pass information to a running task; its builder gets it at the next step, even mid-build."""
+        if task_id in s.tasks:
+            s.board[task_id].append((source, " ".join(str(text).split())[:1200]))
+
+    def heard(s, task_id):
+        notes = s.board[task_id][s.seen[task_id]:]
+        s.seen[task_id] = len(s.board[task_id])
+        return "".join(f"\n- {who}: {what}" for who, what in notes)
+
+    def twin(s, t):
+        """A running task in the same folder asking for the same thing."""
+        mine, where = enc(t.text), t.repo or t.cwd
+        return next((i for ids in s.active.values() for i in ids if i != t.id and s.where.get(i) == where and float(mine @ enc(s.tasks.get(i, ""))) > 0.9), None)
+
+    def folder(s, t):
+        # Work done in place has no worktree, so only one agent may write in that folder at a time.
+        return s.folders.setdefault(t.repo, asyncio.Lock()) if s.direct(t) else contextlib.nullcontext()
+
+    async def changed(s, tree):
+        rc, out = await s.git("status", "--porcelain", cwd=tree)
+        return [line[3:].split(" -> ")[-1] for line in out.splitlines()] if not rc else []
+
+    async def others(s, t):
+        """Prompt lines and changed files of the other running tasks in the same folder."""
+        lines, files = [], {}
+        for who, ids in list(s.active.items()):
+            for i in sorted(ids):
+                if i == t.id or s.where.get(i) != t.repo:
+                    continue
+                tree = s.root / "work" / i
+                files[i] = await s.changed(str(tree)) if tree.is_dir() else []
+                advice = f"; advice they were given: {s.advice[i]}" if i in s.advice else ""
+                lines.append(f"- task {i} ({who}): {s.tasks.get(i, '')[:120]}; changing: {', '.join(files[i][:15]) or 'nothing yet'}{advice}")
+        return lines, files
+
+    async def followup(s, t, name, wt):
+        """New team notes and clashes with other running tasks, as text for one more pass; empty when there are none."""
+        parts = []
+        if heard := s.heard(t.id):
+            parts.append(f"New information from the team:{heard}")
+        _, others = await s.others(t)
+        mine = set(await s.changed(wt)) if others else set()
+        for i, files in others.items():
+            clash = sorted(mine & set(files))
+            if not clash or (t.id, i) in s.warned:
+                continue
+            s.warned |= {(t.id, i), (i, t.id)}
+            _, diff = await s.git("diff", "HEAD", "--", *clash, cwd=str(s.root / "work" / i))
+            parts.append(f"Task {i} is also changing {', '.join(clash)}. Its changes so far:\n{diff[:3000]}\nKeep your work compatible with theirs, build on it instead of redoing it, and leave out anything they already did.")
+            s.tell(i, f"task {t.id} ({name})", f"also changes {', '.join(clash)}; keep compatible and do not redo each other's work")
+        return "\n\n".join(parts)
+
+    @on(Consulted)
+    async def consulted(s, c):
+        s.tell(c.id, c.member, c.findings)
+
+    @on(Feedback)
+    async def feedback(s, f):
+        s.tell(f.task.id, f.source, f.text)
+
+    @on(Vote)
+    async def ballot(s, v):
+        s.ballots[v.task.id].append(f"{v.voter} {v.p:.2f}")
+
     async def toss(s, t, to, ask):
         await s.bus.emit(Tossed(t, to, ask))
         return await s.crew[to].ask(ask, t.cwd)
 
     async def resume(s, t, name):
-        worktree = s.root / "work" / t.id
-        rc, branch = await s.git("branch", "--show-current", cwd=worktree)
-        if rc or branch.strip() != f"fam/{t.id}":
-            raise RuntimeError(f"the preserved worktree for task {t.id} is unavailable or has changed")
+        worktree = await s.home(t)
         s.active[name].add(t.id)
         s.tasks[t.id] = t.text
         await s.bus.emit(Assigned(t, name, "resuming preserved work after a daemon restart"))
@@ -157,10 +245,7 @@ class Lead(Node):
             raise
 
     async def answer(s, t, name, answer):
-        worktree = s.root / "work" / t.id
-        rc, branch = await s.git("branch", "--show-current", cwd=worktree)
-        if rc or branch.strip() != f"fam/{t.id}":
-            raise RuntimeError(f"the preserved worktree for task {t.id} is unavailable or has changed")
+        worktree = await s.home(t)
         answered = replace(t, text=f"{t.text}\n\nUser clarification: {answer}")
         s.active[name].add(t.id)
         s.tasks[t.id] = answered.text
@@ -172,9 +257,7 @@ class Lead(Node):
             raise
 
     async def resolve(s, t, accept):
-        rc, branch = await s.git("branch", "--show-current", cwd=t.cwd)
-        if rc or branch.strip() != f"fam/{t.id}":
-            raise RuntimeError(f"the preserved worktree for task {t.id} is unavailable or has changed")
+        await s.home(t)
         await s.bus.emit(HumanDecision(t, accept))
         if accept:
             await s.apply(t)
@@ -184,9 +267,14 @@ class Lead(Node):
 
     @on(Task)
     async def route(s, t):
+        if twin := s.twin(t):
+            s.tell(twin, "the user", f"asked again: {t.text}")
+            await s.bus.emit(Said("Skipper", f"That matches task {twin}, which is already running, so I passed your wording to it instead of starting a second agent on the same work."))
+            return
         name = t.pin or s.select(t.text)
         s.active[name].add(t.id)
         s.tasks[t.id] = t.text
+        s.where[t.id] = t.repo or t.cwd
         await s.bus.emit(Assigned(t, name, "learned task fit, capability, and current workload"))
         try:
             await s.execute(t, name)
@@ -194,16 +282,26 @@ class Lead(Node):
             s.active[name].discard(t.id)
             raise
 
-    async def execute(s, t, name, workspace=None):
+    async def execute(s, t, name, workspace=None, fix=False):
         wt_future = asyncio.sleep(0, result=workspace) if workspace else s.workspace(t)
         wt, b = await asyncio.gather(wt_future, s.advise(t))
         t = replace(t, cwd=wt, repo=t.repo or t.cwd)
+        s.where[t.id] = t.repo
+        async with s.folder(t):
+            await s.build(t, name, wt, b, fix)
+
+    async def build(s, t, name, wt, b, fix=False):
         text, notes = f"{t.text}\n{render(b)}", ""
-        for step in FLOWS[t.flow or flow_of(t.text)]:
+        for step in () if fix else FLOWS[t.flow or flow_of(t.text)]:
             who, ask = STEPS.get(step, (None, None))
             if who in s.crew:
                 notes += f"\n[{who}] " + await s.toss(t, who, f"{ask}\nTask: {text}{notes}")
-        prompt = f"{text}{notes}{WRAP}{NEED if s.linker else ''}"
+        s.advice[t.id] = f"{render(b)}{notes}"[:600]
+        lines, _ = await s.others(t)
+        around = "\nOther work in progress in this folder; never repeat it or edit the same files without building on theirs, and take their advice into account:\n" + "\n".join(lines) if lines else ""
+        news = s.heard(t.id)
+        team = f"\nNew information from the team:{news}" if news else ""
+        prompt = f"{text}{notes}{around}{team}{WRAP}{NEED if s.linker else ''}"
         agent, mcp = s.members[name], s.linker.write(s.linker.always()) if s.linker else None
         out = await agent.ask(prompt, wt, mcp)
         if out.startswith("ASK_USER:"):
@@ -220,6 +318,11 @@ class Lead(Node):
                 await s.discard(t)
                 return
             out = await agent.ask(prompt, wt, mcp)
+        for _ in range(2):
+            more = await s.followup(t, name, wt)
+            if not more:
+                break
+            out = await agent.ask(f"{t.text}\n\nYou have already made changes in this folder. {more}\n\nAdjust your work only if needed.{WRAP}", wt, mcp)
         check = "; ".join([*b.get("verify", []), *b.get("pitfalls", [])])
         await s.bus.emit(Output(t, name, out, check))
 
@@ -234,16 +337,41 @@ class Lead(Node):
         s.active[d.member].discard(d.task.id)
         if d.escalate:
             return
-        s.tasks.pop(d.task.id, None)
-        if d.accept:
-            if s.apply_accepted:
-                await s.apply(d.task)
+        if not d.accept:
+            await s.revise(d.task, d.member)
             return
-        await s.discard(d.task)
-        price = s.members[d.member].price
-        up = min((n for n, m in s.members.items() if m.price > price), key=lambda n: s.members[n].price, default=None)
-        if up and d.task.tries + 1 < s.tries:
-            await s.bus.emit(Task(d.task.text, d.task.repo, f"{d.task.id}+", d.task.tries + 1, pin=up, flow=d.task.flow))
+        s.tasks.pop(d.task.id, None)
+        for book in (s.board, s.seen, s.advice, s.rounds, s.climbs, s.ballots):
+            book.pop(d.task.id, None)
+        if s.apply_accepted:
+            await s.apply(d.task)
+
+    async def revise(s, t, member):
+        """Send the tests' and reviewers' feedback back to a builder in the same worktree, looping until the review passes."""
+        name = member
+        if s.rounds[t.id] >= s.fix_rounds:
+            price = s.members[member].price
+            up = min((n for n, m in s.members.items() if m.price > price), key=lambda n: s.members[n].price, default=None)
+            if not up or s.climbs[t.id] + 1 >= s.tries:
+                left = s.heard(t.id).strip()
+                s.tasks.pop(t.id, None)
+                for book in (s.board, s.seen, s.advice, s.rounds, s.climbs, s.ballots):
+                    book.pop(t.id, None)
+                await s.bus.emit(Said("Skipper", f"Task {t.id} still fails review after every builder had a go, so I stopped. Its work is kept at {t.cwd}. Open problems:\n{left[:1500] or 'none recorded'}\nAsk a member to look (for example “ask Vera to check task {t.id}”) or give me a narrower task."))
+                return
+            s.climbs[t.id] += 1
+            s.rounds[t.id] = 0
+            name = up
+        s.rounds[t.id] += 1
+        s.tell(t.id, "Skipper", f"Your last attempt did not pass review ({', '.join(s.ballots.pop(t.id, [])) or 'no votes'}). Fix exactly the problems listed above, keep what already works, and stop once the checks pass.")
+        await s.bus.emit(Said("Skipper", f"Task {t.id} did not pass review; sending the feedback back to {name} (attempt {s.rounds[t.id] + 1})."))
+        s.active[name].add(t.id)
+        await s.bus.emit(Assigned(t, name, "fixing the review feedback"))
+        try:
+            await s.execute(t, name, t.cwd, fix=True)
+        except Exception:
+            s.active[name].discard(t.id)
+            raise
 
 class Reviewer(Node):
     def __init__(s, bus, name, agent=None, veto=False):
@@ -255,17 +383,35 @@ class Reviewer(Node):
 
 
 class Suite(Reviewer):
-    cmd = ("python3", "-m", "pytest", "-q")
+    # The daemon's own interpreter, so the repo's dependencies (fastapi, numpy) are importable.
+    cmd = (sys.executable, "-m", "pytest", "-q", "-rfE")
 
     def __init__(s, bus, name="tests"):
         super().__init__(bus, name, veto=True)
+        s.out = {}
+
+    @staticmethod
+    def failures(out):
+        return {re.split(r" - ", line, maxsplit=1)[0] for line in out.splitlines() if line.startswith(("FAILED", "ERROR"))}
 
     async def rc(s, o):
-        return (await sh(*s.cmd, cwd=o.task.cwd))[0]
+        code, out = await sh(*s.cmd, cwd=o.task.cwd)
+        s.out[o.task.id] = out
+        if code not in (2, 3, 4) or not o.task.repo or o.task.repo == o.task.cwd:
+            return code
+        # Collection or environment errors the repo already has are not this change's fault.
+        _, base = await sh(*s.cmd, cwd=o.task.repo)
+        if not s.failures(out) - s.failures(base):
+            await s.bus.emit(Said("Tests", "The test run could not complete, and the repository fails the same way without this change, so the tests are inconclusive."))
+            return 5
+        return code
 
     @on(Output)
     async def run(s, o):
         p = {0: 0.95, 5: 0.5}.get(await s.rc(o), 0.05)
+        if p < 0.5:
+            await s.bus.emit(Feedback(o.task, "tests", (s.out.pop(o.task.id, "") or "the test command failed")[-3000:]))
+        s.out.pop(o.task.id, None)
         await s.cast(o.task, o.member, p)
         if p >= 0.5:
             await s.bus.emit(Green(o.task, o.member, o.check))
@@ -281,6 +427,9 @@ class Panel(Reviewer):
             r, p = {}, 0.5
         if r.get("say"):
             await s.bus.emit(Said(s.name, str(r["say"])))
+        fixes = [str(x) for x in r.get("fixes", [])][:6] if isinstance(r.get("fixes"), list) else []
+        if fixes or (r and p < 0.7):
+            await s.bus.emit(Feedback(g.task, s.name, "; ".join(fixes) or str(r.get("say", ""))))
         await s.cast(g.task, g.member, p)
 
 

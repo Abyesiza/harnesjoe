@@ -15,6 +15,8 @@ from contextvars import ContextVar
 import logging
 import re
 
+import skills
+
 from core import ACCESS, Access, Correction, Lesson, Node, jsonin, on, sh, sh_split
 
 log = logger = logging.getLogger("fam.agents")
@@ -188,6 +190,9 @@ class Agent:
     ledger = Ledger(float(os.environ.get("FAM_BUDGET", "5")))
     timeout = float(os.environ.get("FAM_AGENT_TIMEOUT", "900"))
     tracker: Tracker | None = None
+    skills_root = None  # set on members that should be offered skills
+    profile = None  # what the family has learned about the user's way of working
+    working: Counter = Counter()  # persona name -> calls in flight, so reviewers and advisors show as busy
 
     def __init__(s, persona, rules, model: str = "", fallbacks: list["Agent"] | None = None):
         s.persona, s.rules, s.model, s.price = persona, rules, model, PRICE.get(model, 1.0)
@@ -205,7 +210,9 @@ class Agent:
 
     def prompt(s, text: str) -> str:
         rules = s.rules.active if s.rules else ()
-        return f"{s.persona.render(rules)}\n\n{text}"
+        extra = skills.block(s.skills_root, text) if s.skills_root else ""
+        about = s.profile.text(set(rules)) if s.profile else ""
+        return f"{s.persona.render(rules)}\n\n{about}{extra}{text}"
 
     async def once(s, text: str, cwd: str = ".", mcp: str | None = None) -> str:
         prompt = s.prompt(text)
@@ -262,6 +269,14 @@ class Agent:
         return len(lines)
 
     async def ask(s, text: str, cwd: str = ".", mcp: str | None = None) -> str:
+        who = getattr(s.persona, "name", "")
+        Agent.working[who] += 1
+        try:
+            return await s.ask_chain(text, cwd, mcp)
+        finally:
+            Agent.working[who] -= 1
+
+    async def ask_chain(s, text: str, cwd: str = ".", mcp: str | None = None) -> str:
         if s.ledger.over:
             raise OverBudget(s.ledger.spent)
         tracker = Agent.tracker
@@ -299,7 +314,7 @@ READ_SHELL = ("ls", "cd", "pwd", "cat", "head", "tail", "tree", "du", "wc", "sta
 CLAUDE_READ = ("Read", "Glob", "Grep", "LS", *(f"Bash({c}:*)" for c in READ_SHELL), "Bash(git -C:*)")
 CLAUDE_WRITE = ("Edit", "Write", "NotebookEdit")
 # Primary-source lookups for research; withheld when reviewing untrusted code.
-WEB_SHELL = ("gh search", "gh api", "gh repo view", "gh release view")
+WEB_SHELL = ("gh search", "gh repo view", "gh release view")
 CLAUDE_WEB = ("WebSearch", "WebFetch", *(f"Bash({c}:*)" for c in WEB_SHELL))
 
 
@@ -333,7 +348,7 @@ class Copilot(Agent):
     def argv(s, prompt: str, mcp: str | None = None, live: bool = False) -> list[str]:
         # -p takes the prompt as its value; options follow it.
         access = ACCESS.get()
-        return [*s.cmd, prompt, *s.access_args(access), *(["--allow-all-tools"] if live and not access.readonly else [])]
+        return [*s.cmd, prompt, *s.access_args(access), *(["--allow-all"] if live and not access.readonly else [])]
 
     def access_args(s, access: Access) -> list[str]:
         out = [a for d in access.dirs for a in ("--add-dir", d)]

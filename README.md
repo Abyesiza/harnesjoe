@@ -32,7 +32,7 @@ Start the daemon and open the web conversation with one command:
 python daemon.py up
 ```
 
-To start without opening a browser, use `python daemon.py start`. The web conversation is at <http://127.0.0.1:8000>. The page shows builders, reviewers and research members around the central chat, and indicates when Skipper is waiting on a response.
+To start without opening a browser, use `python daemon.py start`. The web conversation is at <http://127.0.0.1:8000>. The page shows builders, reviewers and research members around the central chat, and indicates when Skipper is waiting on a response. Each member card shows whether it is working; builders also show their model and price. The four builders (Spark, Ember, Blaze, Pip) share one job, writing the least code, and differ by engine and cost: Spark runs on Haiku (cheapest), Pip on Copilot with a Claude fallback, Ember on Sonnet and Blaze on Opus. A task goes to the best fit for its workload, and a failed review retries with the next more expensive builder.
 
 ```sh
 python daemon.py talk
@@ -59,6 +59,19 @@ python daemon.py service-stop
 The service runs the checked-out source tree at its current path. Run `install-service` again after moving the project.
 The generated service carries the current CLI executable directories into its `PATH`, so Claude and Copilot remain available when systemd starts Skipper outside an interactive shell.
 
+## Next.js UI (optional)
+
+`frontend/` is a Next.js App Router version of the web page. The original `web/index.html` still works and is still served by `server.py`.
+
+```sh
+python daemon.py start          # API on 127.0.0.1:8000
+cd frontend
+npm ci
+npm run dev                     # UI on http://localhost:3000
+```
+
+Next proxies `/api/*` to the Python server, so the browser only talks to Next. Set `API_URL` (server side, default `http://127.0.0.1:8000`) if the API runs elsewhere. Open the UI at `localhost` or `127.0.0.1`: the `/token` route refuses other hosts, and it reads the per-session token from the Python page the same way the old page does. Check with `npm run lint`, `npm run typecheck` and `npm run build`.
+
 ## Local state and safety
 
 Conversation history, event history, folder approvals, routing knowledge, tool proposals, and cached briefs are stored locally under `~/.fam` by default. Set `FAM_HOME` to move that state directory. Set `FAM_REPO` to choose the default Git repository.
@@ -70,6 +83,18 @@ Research jobs are listed as active work under Quill until findings arrive. If Sk
 ### What agents may read, write and run
 
 Task agents run with no shell or file restrictions: Claude Code runs with permissions skipped and Copilot with all tools allowed, so builds, tests, installs and edits work anywhere the user's account can reach. Bash commands are only recorded (by the `runlog.py` hook) and listed in each run and its report. Two read-only cases remain: chat with a family member, and review of untrusted repositories, which can read but never edit or run code.
+
+### Skills
+
+Ranger copies the skills (folders with a `SKILL.md`) from repositories it scores at 0.7 or higher into `~/.fam/skills/<owner>__<repo>/`. To add your own, drop a folder with a `SKILL.md` into `~/.fam/skills/<any name>/`. Every family member (builders, reviewers, Quill and the rest, but not Skipper's routing) is offered up to three skills that fit what it is asked (name, description and path, matched to the request) and may read them. Say “skills” in chat to see what is available and how often each was offered. Lessons from the same reviews become rules only after they are seen twice.
+
+### Working together
+
+Members share a notebook per task. Advice from Sage, Blue and Tess, findings from consulted members, and anything you add to a running task (“tell task 1234abcd: use the existing form component”) reach the builder before its next step, even mid-build: it gets one follow-up pass with the new information. Builders also see what other running tasks in the same folder are changing and the advice those tasks were given. A task that repeats one already running is passed to it instead of starting a second agent, and when two running tasks change the same file each is shown the other's changes and told to stay compatible instead of redoing the work. Work done in place in a plain folder runs one agent at a time. When the tests or reviewers reject a change, their output and fixes go back to the same builder in the same worktree, which fixes and is checked again, up to 3 rounds per builder; then the next more expensive builder continues from the same work, and only when every builder has had a go does Skipper stop and report the open problems (the work is kept, never discarded).
+
+### How you work
+
+The family learns how you like work done and passes it to every member in their prompts. What you state (“keep functions small”, “always put results in the repo folder”) is in force at once. Habits Sage notices in your own commits (in approved git folders) and in your recent chat requests are in force once seen twice. This runs on the scheduled check and when you say “learn from my work”. Say “habits” to see everything learned and where it came from, and “forget 3” to drop one. It is stored in `~/.fam/profile.json`; your commit diffs and messages are sent to the model for this, with lockfiles, `node_modules` and `.env` files left out.
 
 ### Attachments
 

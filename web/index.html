@@ -35,6 +35,11 @@ main{min-height:0;display:grid;grid-template-columns:minmax(190px,240px) minmax(
 .member strong{display:block}.member p{margin:4px 0 0;color:var(--dim);font-size:12px}
 .member .availability{font-size:11px;color:var(--green);margin-top:5px}
 .member.busy .availability{color:var(--yellow)}
+.member .details{margin-top:4px;font-size:11px;color:var(--dim)}
+.member.busy{border-color:var(--yellow)}.member .availability .spinner{display:inline-block;vertical-align:-3px;margin-right:6px;width:11px;height:11px}
+:root{--radius:.9rem;--shadow:0 1px 2px #0000000d,0 8px 24px #0000000f}
+header{box-shadow:var(--shadow)}.side,.center,.dialog{box-shadow:var(--shadow);border-radius:1.1rem}.member,.message,.chip{box-shadow:0 1px 3px #00000014}.member{border-radius:.8rem}.message{border-radius:1rem}
+button,input,textarea{border-radius:.7rem}button:hover{box-shadow:0 2px 8px #0000001a}.pill{box-shadow:0 1px 2px #0000000d}
 .center{display:grid;grid-template-rows:auto 1fr auto;overflow:hidden}
 #health{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .pill{border:1px solid var(--line);border-radius:99px;padding:3px 10px;color:var(--dim);font-size:13px}
@@ -163,8 +168,13 @@ function card(member) {
   const availability = document.createElement("div");
   availability.className = "availability";
   const tasks = member.active_tasks || [];
-  availability.textContent = member.available ? "Available" : `Working: ${tasks.join(", ") || "assigned task"}`;
+  availability.textContent = member.available ? "Available" : `Working: ${tasks.join(", ") || (member.working ? "checking or advising" : "assigned task")}`;
+  if (!member.available) { const spin = document.createElement("span"); spin.className = "spinner"; availability.prepend(spin); }
   box.append(name, purpose, availability);
+  const more = document.createElement("div");
+  more.className = "details";
+  if (member.builder && member.model) more.append(`${member.model} · $${member.price}/M`);
+  box.append(more);
   return box;
 }
 function updateHealth(h) {
@@ -218,8 +228,8 @@ async function loadHistory() {
   } catch (e) { $("error").textContent = e.message; }
 }
 const words = {
-  Assigned: d => `${d.member} is taking task ${d.task.id}: ${d.task.text}`,
-  ResearchRequest: d => `Quill started research job ${d.id}: ${d.question}`,
+  Assigned: d => `${d.member} is taking task ${d.task.id}: ${d.task.text.slice(0, 100)}`,
+  ResearchRequest: d => `Quill started research job ${d.id}: ${d.question.slice(0, 100)}`,
   Output: d => `${d.member} finished a first pass. The family is checking it.`,
   Green: () => "The tests passed. The family is reviewing the change.",
   Decision: d => d.accept ? "The family accepted the change." : d.escalate ? "The family disagrees; Skipper needs your decision." : "The review did not pass. Skipper is looking at next steps.",
@@ -302,7 +312,7 @@ stream.onmessage = async e => {
     if (event.type === "FolderApproved") await refreshFolders();
     if (event.type === "Permission") { li($("activity"), [el("b", "Permissions "), el("span", d.text), el("span", ago(event.ts), "meta")]); bubble("event", "ℹ️ " + d.text + " (read-only)", event.ts); }
     if (text) bubble("event", text, event.ts);
-    if (["Assigned", "ResearchRequest", "Finding", "Decision", "Applied", "ApplyPending", "Error", "Question", "HumanAnswer"].includes(event.type)) await refreshHealth();
+    if (["Assigned", "ResearchRequest", "Finding", "Decision", "Applied", "ApplyPending", "Error", "Question", "HumanAnswer", "Run", "Consulted"].includes(event.type)) await refreshHealth();
     if (event.type === "FolderApprovalNeeded") await refreshFolders();
   } catch (err) { $("error").textContent = err.message; }
 };
@@ -436,6 +446,7 @@ $("chat").addEventListener("submit", async e => {
   try {
     const result = await api("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,repo:$("repo").value.trim(),attachments:sending.map(f => f.id)})});
     result.messages.filter(m => m.role !== "user").forEach(m => bubble(m.role === "member" ? "member" : "skipper", m.text, m.ts));
+    if (result.repo) $("repo").value = result.repo;
     $("text").value = "";
     await refreshHealth();
   } catch (err) { $("error").textContent = err.message; pending = sending.concat(pending); drawChips(); }

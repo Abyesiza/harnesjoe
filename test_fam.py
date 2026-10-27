@@ -210,10 +210,10 @@ def test_pipeline_accept_and_learn(tmp_path):
 
 def test_red_tests_skip_the_paid_panel_and_still_teach(tmp_path):
     bus = Bus()
-    brain, seen, panel = family(bus, [.9, .9], tmp_path)
+    brain, seen, panel = family(bus, [.9, .9], tmp_path, fix_rounds=0)
     asyncio.run(bus.emit(Task("add feature", cwd=repo(tmp_path, passing=False), id="t1")))
     assert not seen[0].accept and not seen[0].escalate and brain.i == 1
-    assert all(p.agent.n == 0 for p in panel) and not (tmp_path / "env/work/t1").exists()
+    assert all(p.agent.n == 0 for p in panel) and (tmp_path / "env/work/t1").exists()
 
 
 def test_green_tests_but_panel_split_escalates_without_learning(tmp_path):
@@ -234,17 +234,41 @@ def test_cascade_escalates_to_pricier_member_and_succeeds(tmp_path):
     a, b = Fake("weak"), Fixer("strong")
     a.price, b.price = 1.0, 2.0
     bus = Bus()
-    brain, seen, panel = family(bus, [.9], tmp_path, {"a": a, "b": b})
+    brain, seen, panel = family(bus, [.9], tmp_path, {"a": a, "b": b}, fix_rounds=0)
     asyncio.run(bus.emit(Task("hard job", cwd=repo(tmp_path, passing=False), id="t1", pin="a")))
     assert [(d.member, d.accept) for d in seen] == [("a", False), ("b", True)]
-    assert not (tmp_path / "env/work/t1").exists() and (tmp_path / "env/work/t1+").exists()
+    assert (tmp_path / "env/work/t1").exists() and not (tmp_path / "env/work/t1+").exists()
+
+
+class FixOnFeedback(Fake):
+    async def ask(s, text, cwd=".", mcp=None):
+        if "New information from the team" in text and "tests:" in text:
+            Path(cwd, "test_x.py").write_text("def test_x():\n    assert True\n")
+        return await super().ask(text, cwd, mcp)
+
+
+def test_failing_tests_are_fed_back_to_the_same_builder_until_they_pass(tmp_path):
+    a = FixOnFeedback("done")
+    bus = Bus()
+    brain, seen, panel = family(bus, [.9], tmp_path, {"a": a})
+    asyncio.run(bus.emit(Task("fix it", cwd=repo(tmp_path, passing=False), id="t1", pin="a")))
+    assert [(d.member, d.accept) for d in seen] == [("a", False), ("a", True)]
+    assert "- tests:" in a.seen[-1] and "did not pass review" in a.seen[-1]
+
+
+def test_review_feedback_gives_up_after_the_rounds_run_out_and_keeps_the_work(tmp_path):
+    a = Fake("nope")
+    bus = Bus()
+    brain, seen, panel = family(bus, [.9], tmp_path, {"a": a}, fix_rounds=2)
+    asyncio.run(bus.emit(Task("hopeless", cwd=repo(tmp_path, passing=False), id="t1", pin="a")))
+    assert len(seen) == 3 and not any(d.accept for d in seen) and (tmp_path / "env/work/t1").exists()
 
 
 def test_cascade_stops_at_top_tier(tmp_path):
     a, b = Fake("x"), Fake("y")
     a.price, b.price = 1.0, 2.0
     bus = Bus()
-    brain, seen, panel = family(bus, [.9], tmp_path, {"a": a, "b": b})
+    brain, seen, panel = family(bus, [.9], tmp_path, {"a": a, "b": b}, fix_rounds=0)
     asyncio.run(bus.emit(Task("hopeless", cwd=repo(tmp_path, passing=False), pin="a")))
     assert [d.member for d in seen] == ["a", "b"]
 
@@ -261,11 +285,11 @@ def test_many_tasks_in_parallel(tmp_path):
     assert len(seen) == 12 and brain.i == 12
 
 
-def test_missing_repo_fails_loudly_not_with_a_confusing_path_error(tmp_path):
+def test_missing_folder_fails_loudly_not_with_a_confusing_path_error(tmp_path):
     bus = Bus()
     family(bus, [.9], tmp_path)
     with pytest.raises(RuntimeError):
-        asyncio.run(bus.emit(Task("x", cwd=str(tmp_path))))
+        asyncio.run(bus.emit(Task("x", cwd=str(tmp_path / "missing"))))
 
 
 def test_ticker_survives_a_failing_subscriber():

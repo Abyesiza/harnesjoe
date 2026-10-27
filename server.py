@@ -74,7 +74,7 @@ class Feed:
         task = data.get("task", {}) if isinstance(data, dict) else {}
         task_id = task.get("id", "") if isinstance(task, dict) else ""
         summaries = {
-            "Assigned": lambda d: f"{d['member']} is taking task {d['task']['id']}: {d['task']['text']}",
+            "Assigned": lambda d: f"{d['member']} is taking task {d['task']['id']}: {d['task']['text'][:100]}",
             "Green": lambda d: f"The tests passed for task {d['task']['id']}; the family is reviewing it.",
             "Decision": lambda d: (
                 f"Task {d['task']['id']} was sent for your decision. Send “accept task {d['task']['id']}” or “reject task {d['task']['id']}”."
@@ -226,6 +226,7 @@ async def life(_):
     if request:
         S.store.approve_folder(request["id"], str(initial))
     S.skipper = Skipper(S.store, S.app.skipper)
+    S.app.profile.folders, S.app.profile.messages = S.store.approved_folders, S.store.messages
     for event in S.store.events(limit=100000):
         if event["type"] == "Outcome":
             data = event["data"]
@@ -269,10 +270,12 @@ async def life(_):
                     "message": "Work was interrupted by a Skipper restart. Its isolated worktree was preserved; ask Skipper for help before resuming.",
                 },
             )
-    for stored in S.skipper.pending_apply(records):
+    for stored in {**S.skipper.pending_local_apply(records), **{t["id"]: t for t in S.skipper.pending_apply(records)}}.values():
         task = Task(**stored)
         spawn(S.app.lead.apply(task), task.id)
     pending = S.skipper.pending_decisions(records)
+    for stored in pending:
+        S.app.steward.adopt(Task(**stored))
     if pending:
         ids = ", ".join(task["id"] for task in pending)
         notice = f"Task(s) {ids} are waiting for your decision."
@@ -436,7 +439,10 @@ async def chat(b: ChatIn):
         files = [f for uid in b.attachments if (f := uploads.find(fam_home(), uid))]
         if len(files) != len(b.attachments):
             raise ValueError("One of the attachments was not found; upload it again.")
-        return await S.skipper.chat(b.text + uploads.prompt_block(files), repo, S.app, enqueue)
+        result = await S.skipper.chat(b.text + uploads.prompt_block(files), repo, S.app, enqueue)
+        if isinstance(result, dict):
+            result.setdefault("repo", repo)
+        return result
     except HTTPException:
         raise
     except (ValueError, OSError) as e:

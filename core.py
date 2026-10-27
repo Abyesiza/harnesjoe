@@ -154,11 +154,19 @@ class Scouted:
     skills: list
     lessons: list
     say: str = ""
+    saved: bool = True
 
 
 @dataclass
 class Said:
     name: str
+    text: str
+
+
+@dataclass
+class Feedback:
+    task: Task
+    source: str  # who found the problem: tests or a reviewer
     text: str
 
 

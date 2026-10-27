@@ -2,9 +2,9 @@
 
 import asyncio
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 
-from core import ACCESS, CURRENT_TASK, Access, Approve, Decision, HumanAnswer, Node, Proposal, Question, Said, jsonin, on, sh
+from core import ACCESS, CURRENT_TASK, Access, Approve, Decision, HumanAnswer, Node, Proposal, Question, Said, Vote, jsonin, on, sh
 
 log = logging.getLogger("fam.steward")
 
@@ -35,6 +35,7 @@ class Steward(Node):
         super().__init__(bus)
         s.agent, s.lead, s.linker, s.min_stars = agent, lead, linker, min_stars
         s.answered, s.decided, s.jobs = Counter(), set(), set()
+        s.votes = defaultdict(list)
 
     def spawn(s, task_id, coro):
         async def run():
@@ -51,8 +52,9 @@ class Steward(Node):
     async def tell(s, text):
         await s.bus.emit(Said("Skipper", text))
 
-    async def judge(s, prompt, cwd):
-        token = ACCESS.set(Access((cwd,), readonly=True, untrusted=True))
+    async def judge(s, prompt, cwd, run=False):
+        # Deciding a split review may run the project's checks; routine questions only read.
+        token = ACCESS.set(Access((cwd,)) if run else Access((cwd,), readonly=True, untrusted=True))
         try:
             return jsonin(await s.agent.ask(prompt, cwd))
         finally:
@@ -85,17 +87,34 @@ class Steward(Node):
             await s.tell(f"I approved {name} for you. A task needed “{p.need}” and it is a well-known server ({prop['why']}).")
             return
 
+    @on(Vote)
+    async def vote(s, v):
+        s.votes[v.task.id].append(v)
+
     @on(Decision)
     async def decision(s, d):
         if d.escalate and d.task.id not in s.decided:
             s.decided.add(d.task.id)
             s.spawn(d.task.id, s.settle(d))
 
+    def adopt(s, task):
+        """Review a decision that was still waiting when the daemon restarted."""
+        if task.id not in s.decided:
+            s.decided.add(task.id)
+            s.spawn(task.id, s.settle(Decision(task, "", False, True, 0.0)))
+
     async def settle(s, d):
         t = d.task
         await sh("git", "add", "-N", ".", cwd=t.cwd)
-        _, diff = await sh("git", "diff", "HEAD", cwd=t.cwd)
-        r = await s.judge(f"{JUDGE}\nTask: {t.text}\nDisagreement among reviewers: {d.spread:.2f}\nChanges:\n{diff[:8000]}", t.cwd)
+        _, stat = await sh("git", "diff", "--stat", "HEAD", cwd=t.cwd)
+        _, diff = await sh("git", "diff", "HEAD", "--", ".", ":(exclude)*lock*", ":(exclude)*node_modules*", ":(exclude).next", cwd=t.cwd)
+        votes = "; ".join(f"{v.voter} {v.p:.2f}{' (veto)' if v.veto and v.p < 0.5 else ''}" for v in s.votes.get(t.id, []))
+        r = await s.judge(
+            f"{JUDGE}\nYou are in the task's worktree: read any file you need and run its checks (build, lint, typecheck, tests) yourself before deciding; do not change source files.\n"
+            f"Task: {t.text}\nReviewer votes: {votes or 'unknown'} (spread {d.spread:.2f})\nFiles changed:\n{stat[-3000:]}\nDiff (cut at 12000 characters):\n{diff[:12000]}",
+            t.cwd,
+            run=True,
+        )
         verdict, why = str(r.get("decision", "ask")).lower(), str(r.get("reason", ""))[:300]
         if verdict not in ("accept", "reject"):
             await s.tell(f"Task {t.id} needs your decision: {why or 'it is important or unclear'}. Send “accept task {t.id}” or “reject task {t.id}”.")

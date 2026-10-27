@@ -156,3 +156,32 @@ def test_consult_runs_members_in_parallel_and_reports_each_finding(tmp_path):
     keys, cwd, found = skipper.consult_plan(app, "Vera, dash", str(tmp_path), "abcd1234")
     asyncio.run(skipper.consult(app, keys, "verify", cwd, found))
     assert keys == ["vera", "dash"] and sorted(got) == [("dash", "fast enough"), ("vera", "tests pass")]
+
+
+def test_task_board_reports_each_task_and_where_it_stands(tmp_path):
+    from collections import defaultdict
+    from types import SimpleNamespace
+
+    from skipper import Skipper, StateStore
+
+    store = StateStore(tmp_path / "s.sqlite3")
+    task = {"id": "9e1696b0", "text": "Next.js UI", "cwd": "/w"}
+    store.event("Task", task)
+    store.event("Assigned", {"task": task, "member": "ember", "reason": "x"})
+    store.event("Decision", {"task": task, "member": "ember", "accept": False, "escalate": True, "spread": 0.4})
+    app = SimpleNamespace(lead=SimpleNamespace(active=defaultdict(set)))
+    board = Skipper(store).task_board(app)
+    assert board == [{"id": "9e1696b0", "task": "Next.js UI", "member": "ember", "state": "waiting for your decision"}]
+    app.lead.active["ember"].add("9e1696b0")
+    assert Skipper(store).task_board(app)[0]["state"] == "working"
+
+
+def test_move_command_selects_and_grants_a_folder(tmp_path):
+    from skipper import Skipper, StateStore
+
+    target = tmp_path / "proj"
+    target.mkdir()
+    (target / "a.txt").write_text("x")
+    store = StateStore(tmp_path / "s.sqlite3")
+    result = asyncio.run(Skipper(store).chat(f"move to {target}", str(tmp_path), None, lambda *_: None))
+    assert result["repo"] == str(target) and "a.txt" in result["reply"] and str(target) in store.approved_folders()

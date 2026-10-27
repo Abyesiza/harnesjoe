@@ -8,10 +8,11 @@ import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
+import skills
 from core import ACCESS, Access, Approve, Consulted, HumanAnswer, ResearchRequest, Task
 from link import ready
 
-INTENTS = {"task", "status", "member_chat", "answer_question", "research", "focus", "teach", "approve_tool", "answer", "consult"}
+INTENTS = {"task", "status", "member_chat", "answer_question", "research", "focus", "teach", "approve_tool", "answer", "consult", "note"}
 LIMITS = {"intent": 40, "task": 8000, "member": 120, "reply": 4000, "name": 200}
 SYSTEM = {"/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var", "/home", "/snap", "/mnt", "/media"}
 SENSITIVE = {".ssh", ".gnupg", ".aws", ".kube", ".password-store", ".fam"}
@@ -115,6 +116,7 @@ def lobby() -> str:
 
 
 JOB_ID = re.compile(r"\b([0-9a-f]{8})\b")
+MOVE = re.compile(r"^\s*(?:please\s+)?(?:cd|go to|move to|switch to|change to|open|work in)\s+(.+?)\s*$", re.I)
 CONSULT_ASK = re.compile(r"\b(verif\w*|test\w*|review|validate|audit|confirm|double-check)\b", re.I)
 FOUND = re.compile(r"\bwhat (?:did |has |have )?(\w+) (?:find|found|say|said|conclude|concluded|report|reported)\b", re.I)
 MODEL_Q = re.compile(r"\b(?:which|what) (?:model|llm|cli)s?\b.*?\b(?:does|do|is|for|of)\s+(\w+)|\b(\w+)(?:'s|’s) model\b", re.I)
@@ -158,9 +160,12 @@ PLAN = (
     "You are Skipper, the user's conversational chief of staff for an autonomous software family. "
     "Classify the request and decide the next safe step. Only assign implementation work after the user asks for a concrete software outcome. "
     "Questions should be answered directly. Do not invent that work, tests, or approvals happened. "
-    "Choose only one intent: task, status, member_chat, answer_question, research, focus, teach, approve_tool, answer, or consult. "
+    "Choose only one intent: task, status, member_chat, answer_question, research, focus, teach, approve_tool, answer, consult, or note. "
     "Use consult when a task needs help, verification, testing or review from any family members: put their keys comma-separated in member, what to check in task, and the task id in name when known. They work in the background and Skipper reports their findings. "
     "Every task listed under a member's running list is active at the same time; a new message never pauses or replaces them, and you can answer about any of them. "
+    "When the user asks how a specific task or piece of work is going, use intent answer and report from the task list (id, what it is, who has it, its state); say plainly if nothing matches. Use status only for a general overview. "
+    "Use note when the user adds information, a correction or a hint for a task that is already running; put the note in task and the task id in name. "
+    "Use teach when the user states how they like code written or work done (a preference, a correction, a standing rule); put it in task as one imperative sentence. "
     "For tasks choose a builder by capability and current active workload, or leave member empty for automatic routing. "
     "For member_chat choose any family member by key. For approve_tool provide the exact existing proposal name. "
     "When a pending family question exists, use answer_question only if the user's message answers it; put the answer in task. "
@@ -355,9 +360,63 @@ class StateStore:
         return [row["path"] for row in rows]
 
 
+def engine(agent) -> str:
+    """The CLI and model chain an agent runs on; the first is tried first, the rest are fallbacks."""
+    chain = [agent, *getattr(agent, "fallbacks", [])]
+    return " → ".join(f"{getattr(a, 'cli', 'agent')} ({getattr(a, 'model', '') or 'default model'})" for a in chain)
+
+
+def lineup(cast: dict) -> dict[str, dict]:
+    """Per member: the short model label and price shown on its card."""
+    out = {}
+    for key, agent in cast.items():
+        model = getattr(agent, "model", "")
+        label = "Copilot" if getattr(agent, "cli", "") == "copilot" else model.split("-")[1].title() if model.count("-") >= 2 else "Claude"
+        out[key] = {"model": label, "price": getattr(agent, "price", 1.0)}
+    return out
+
+
+STATE = {
+    "Task": lambda d: "queued",
+    "Assigned": lambda d: "working",
+    "Output": lambda d: "first pass done, being checked",
+    "Green": lambda d: "tests passed, in review",
+    "Decision": lambda d: "waiting for your decision" if d.get("escalate") else "accepted by the family" if d.get("accept") else "rejected by the family",
+    "HumanDecision": lambda d: "accepted by you" if d.get("accept") else "rejected by you",
+    "Applied": lambda d: "applied locally",
+    "ApplyPending": lambda d: f"accepted, not applied yet ({str(d.get('reason', ''))[:80]})",
+    "Blocked": lambda d: f"blocked: {d.get('need', '')}",
+    "Question": lambda d: f"waiting for your answer: {str(d.get('text', ''))[:80]}",
+    "HumanAnswer": lambda d: "answered, continuing",
+    "Error": lambda d: "interrupted by a restart, worktree preserved" if str(d.get("message", "")).startswith("Work was interrupted") else f"error: {str(d.get('message', ''))[:80]}",
+}
+
+
 class Skipper:
     def __init__(s, store, agent=None):
         s.store, s.agent = store, agent
+
+    def task_board(s, app, events=None, limit=12) -> list[dict]:
+        """Every recent task with what it is, who has it, and where it stands, read from the event history."""
+        events = events if events is not None else s.store.events(limit=100000)
+        board: dict[str, dict] = {}
+        for e in events:
+            d, kind = e["data"], e["type"]
+            if kind not in STATE or not isinstance(d, dict):
+                continue
+            t = d.get("task")
+            tid = d.get("id") if kind == "Task" else t.get("id") if isinstance(t, dict) else t if isinstance(t, str) else None
+            if not tid:
+                continue
+            row = board.setdefault(tid, {"id": tid, "task": "", "member": "", "state": ""})
+            row["task"] = row["task"] or str(d.get("text") if kind == "Task" else t.get("text", "") if isinstance(t, dict) else "")[:160]
+            row["member"] = d.get("member") or row["member"] if kind in {"Assigned", "Output", "Question"} else row["member"]
+            row["state"] = STATE[kind](d)
+        for member, ids in app.lead.active.items():
+            for tid in ids:
+                if tid in board:
+                    board[tid].update(member=member, state="working")
+        return list(board.values())[-limit:]
 
     def authorized(s, path):
         path = Path(path).resolve()
@@ -515,6 +574,7 @@ class Skipper:
                 research[data["task"]]["status"] = "failed"
                 research[data["task"]]["summary"] = data["message"]
         active_research = [job for job in research.values() if job["status"] == "running"]
+        details = lineup(app.cast)
         return {
             "running_tasks": sum(len(tasks) for tasks in lead.active.values()) + len(active_research),
             "research": list(research.values())[-20:],
@@ -523,9 +583,11 @@ class Skipper:
                     "key": name,
                     "name": agent.persona.name,
                     "role": agent.persona.mission.split(". ")[0],
+                    **details[name],
                     "builder": name in lead.members,
                     "active": len(lead.active[name]),
-                    "available": not lead.active[name] and not (name == "quill" and active_research),
+                    "available": not lead.active[name] and not (name == "quill" and active_research) and not getattr(agent, "working", {}).get(agent.persona.name, 0),
+                    "working": bool(getattr(agent, "working", {}).get(agent.persona.name, 0)),
                     "active_tasks": [
                         lead.tasks.get(task_id, task_id)
                         for task_id in sorted(lead.active[name])
@@ -549,9 +611,9 @@ class Skipper:
         local_apply = s.pending_local_apply(events)
         interrupted = s.interrupted_tasks(events)
         busy = [
-            f"{m['name']} on {', '.join(task[:70] for task in m['active_tasks'])}"
+            f"{m['name']} on {', '.join(task[:70] for task in m['active_tasks'] if not task.startswith('Research: '))}"
             for m in h["members"]
-            if not m["available"]
+            if not m["available"] and any(not task.startswith("Research: ") for task in m["active_tasks"])
         ]
         free = [m["name"] for m in h["members"] if m["available"]]
         research = [job for job in h["research"] if job["status"] == "running"]
@@ -560,16 +622,18 @@ class Skipper:
             for m in h["members"]
             if m["completed_tasks"]
         ]
+        board = "; ".join(f"{r['id']} “{r['task'][:50]}” is {r['state']}" for r in s.task_board(app, events, 6))
         return (
             f"I’m watching {h['running_tasks']} active task(s). "
             f"{'Working: ' + ', '.join(busy) + '. ' if busy else ''}"
-            f"{'Research: ' + '; '.join(job['id'] + ' with Quill: ' + job['question'] for job in research) + '. ' if research else ''}"
+            f"{'Research: ' + '; '.join(job['id'] + ' with Quill: ' + job['question'][:90] for job in research) + '. ' if research else ''}"
             f"{'Available: ' + ', '.join(free) + '. ' if free else ''}"
             f"{'Performance: ' + ' '.join(learned) + ' ' if learned else ''}"
             f"{'Needs your decision on task(s): ' + ', '.join(t['id'] for t in pending) + '. ' if pending else ''}"
             f"{'Waiting for your answer on task(s): ' + ', '.join(q['task']['id'] for q in questions) + '. ' if questions else ''}"
             f"{'Accepted work ready to apply locally: ' + ', '.join(local_apply) + '. ' if local_apply else ''}"
             f"{'Interrupted task(s), safely preserved: ' + ', '.join(interrupted) + '. Say “resume” to continue the latest. ' if interrupted else ''}"
+            f"{'Recent tasks: ' + board + '. ' if board else ''}"
             f"Estimated spend today ${h['budget']['spent']:.3f} of ${h['budget']['cap']:.2f} (rough: characters/4 × list price). "
             f"Local state is saved on this computer. I’ll tell you when work is assigned, blocked, ready, or needs your decision."
         )
@@ -728,6 +792,33 @@ class Skipper:
             reply = f"I’m checking whether the accepted changes for task {wanted} can now be applied safely."
             assistant = s.store.message("skipper", reply, wanted)
             return {"reply": reply, "task": wanted, "member": None, "messages": [user, assistant]}
+        if re.fullmatch(r"\s*(?:list |show |what are )?(?:my |your )?(?:habits|preferences)\??\s*", lower):
+            reply = app.profile.report()
+            assistant = s.store.message("skipper", reply)
+            return {"reply": reply, "task": None, "messages": [user, assistant]}
+        if forget := re.fullmatch(r"\s*forget(?: habit)?\s+(\d+)\s*", lower):
+            reply = f"Dropped: {app.profile.forget(int(forget.group(1)))}"
+            assistant = s.store.message("skipper", reply)
+            return {"reply": reply, "task": None, "messages": [user, assistant]}
+        if re.fullmatch(r"\s*learn (?:from )?(?:my |how i )(?:work|commits|habits|code|requests)\s*[.!]?", lower):
+            enqueue(app.profile.study())
+            reply = "I’m studying your recent commits and requests now. I’ll tell you what I notice."
+            assistant = s.store.message("skipper", reply)
+            return {"reply": reply, "task": None, "messages": [user, assistant]}
+        if re.fullmatch(r"\s*(?:list |show |what )?(?:our |the )?skills\??\s*", lower):
+            reply = skills.report(app.lead.root)
+            assistant = s.store.message("skipper", reply)
+            return {"reply": reply, "task": None, "messages": [user, assistant]}
+        if (moved := MOVE.match(text)) and len(text) < 300:
+            named = folders_in(moved.group(1)) or local_projects(moved.group(1), s.store.approved_folders())
+            if named:
+                path = safe_folder(named[0])
+                s.store.grant_folder(str(path))
+                items = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir() if not p.name.startswith("."))
+                kind = "a git repository" if (path / ".git").exists() else "a plain folder"
+                reply = f"Now working in {path} ({kind}), {len(items)} items: {', '.join(items[:12])}{'…' if len(items) > 12 else ''}. Tasks I start here can read and write in it."
+                assistant = s.store.message("skipper", reply)
+                return {"reply": reply, "task": None, "repo": str(path), "messages": [user, assistant]}
         if answered := s.direct_answer(text, app):
             assistant = s.store.message("skipper", answered[0], answered[1] or None)
             return {"reply": answered[0], "task": answered[1] or None, "messages": [user, assistant]}
@@ -751,13 +842,13 @@ class Skipper:
                     reply = "I don’t have a research job recorded yet, so I can’t claim Quill has started. Tell me what you want researched and I’ll assign it."
             assistant = s.store.message("skipper", reply)
             return {"reply": reply, "task": None, "messages": [user, assistant]}
-        if re.search(r"\b(status|health|who is working|what is happening|what's happening)\b", lower):
+        if len(text) < 80 and re.search(r"\b(status|health|who is working|what is happening|what's happening)\b", lower):
             reply = s.status(app)
             assistant = s.store.message("skipper", reply)
             return {"reply": reply, "task": None, "messages": [user, assistant]}
         if re.search(r"\b(capabilities|what can (?:the )?(?:family|fam|members)|what does .+ do)\b", lower):
             reply = "Here’s what each family member is for:\n" + "\n".join(
-                f"- {agent.persona.name}: {agent.persona.mission.split('. ')[0]}"
+                f"- {agent.persona.name}: {agent.persona.mission.split('. ')[0]} [{engine(agent)}]"
                 for agent in app.cast.values()
             )
             assistant = s.store.message("skipper", reply)
@@ -831,6 +922,7 @@ class Skipper:
         plan = await s.agent.ask_json(
             f"{PLAN}\nFamily and workload: {json.dumps(members)}\nTools and proposals: {json.dumps(tools)}"
             f"\nQuestions waiting for the user: {json.dumps(questions)}"
+            f"\nTasks and where each stands: {json.dumps(s.task_board(app))}"
             f"\nRecent conversation: {json.dumps(context[-10:])}\nCurrent repository: {repo}\nUser message: {text}",
             lobby(),
         )
@@ -867,6 +959,17 @@ class Skipper:
             reply = reply or f"I’ve asked {names} to check this in the background and I’ll report their findings here when they’re done."
             assistant = s.store.message("skipper", reply, found or None)
             return {"reply": reply, "task": found or None, "messages": [user, assistant]}
+        elif intent == "note":
+            running = [i for ids in app.lead.active.values() for i in ids]
+            wanted = str(plan.get("name", "")).strip()
+            wanted = wanted if wanted in app.lead.tasks else running[0] if len(running) == 1 else ""
+            if not wanted:
+                raise ValueError("Which task is that for? Send its id, for example “tell task 1234abcd: use the existing form component”.")
+            app.lead.tell(wanted, "the user", str(plan.get("task") or text))
+            who = next((app.cast[m].persona.name for m, ids in app.lead.active.items() if wanted in ids), "the builder")
+            reply = reply or f"Passed that to {who} on task {wanted}. They get it before their next step, even mid-build."
+            assistant = s.store.message("skipper", reply, wanted)
+            return {"reply": reply, "task": wanted, "messages": [user, assistant]}
         elif intent == "answer_question":
             pending = {
                 question["task"]["id"]: question

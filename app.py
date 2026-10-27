@@ -32,6 +32,7 @@ from core import (
 )
 from craft import Expert, render
 from family import Advisor, Gate, Judge, Lead, Panel, Researcher, Suite
+from habits import Profile
 from link import Linker
 from mind import Brain
 from scout import Scout
@@ -143,11 +144,18 @@ def build(root=None, apply_accepted=False):
     cast = {k: member(k, p, rules) for k, p in P.items()}
     captain = ClaudeCode(Persona("Skipper", "Understand the user's goal, the family's capabilities and current workload. Return a safe, concise routing decision; never claim work is done before it is checked.", voice="clear, warm, practical, and honest"), rules, TIERS["sonnet"])
     members = {k: cast[k] for k in ("spark", "ember", "blaze", "pip")}
+    for agent in cast.values():
+        for a in (agent, *agent.fallbacks):
+            a.skills_root = root
+    profile = Profile(bus, cast["sage"], root, over=lambda: Agent.ledger.over)
+    for agent in (*cast.values(), captain):
+        for a in (agent, *agent.fallbacks):
+            a.profile = profile
     linker = Linker(bus, root)
     expert = Expert(bus, cast["sage"], cast["hawk"], root / "briefs.npz")
     lead = Lead(bus, members, Brain(list(members), path=root / "router.npz"), root, cast, expert, linker, apply_accepted=apply_accepted)
     Suite(bus)
-    Steward(bus, captain, lead, linker)
+    steward = Steward(bus, captain, lead, linker)
     Panel(bus, "Vera", cast["vera"])
     Panel(bus, "Bastion", cast["bastion"], True)
     Panel(bus, "Dash", cast["dash"])
@@ -157,14 +165,16 @@ def build(root=None, apply_accepted=False):
     Researcher(bus, cast["quill"], web=websearch.search)
     Scout(bus, cast["ranger"], QUERIES, root)
     Show(bus)
-    return SimpleNamespace(bus=bus, expert=expert, lead=lead, cast=cast, skipper=captain, linker=linker, gate=Gate(bus, path=root / "gate.npz"))
+    return SimpleNamespace(bus=bus, expert=expert, lead=lead, cast=cast, skipper=captain, linker=linker, steward=steward, profile=profile, gate=Gate(bus, path=root / "gate.npz"))
 
 
 def roster():
     log.info("Skipper  the head: routes work, tosses tasks, decides (no model, pure math)")
     log.info("Socket   finds and links MCP servers, asks before trusting (no model)")
     for k, p in P.items():
-        log.info(f"{p.name:8} {MODEL.get(k, 'copilot'):18} {p.mission.split('. ')[0].rstrip('.')}. | {p.voice}")
+        agent = member(k, p, None)
+        engine = " → ".join(f"{a.cli} ({a.model or 'default model'})" for a in [agent, *agent.fallbacks])
+        log.info(f"{p.name:8} {engine:44} {p.mission.split('. ')[0].rstrip('.')}. | {p.voice}")
 
 
 if __name__ == "__main__":

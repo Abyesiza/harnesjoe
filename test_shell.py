@@ -53,7 +53,7 @@ def test_task_runs_have_no_permission_limits():
     claude = agents.ClaudeCode(agents.Persona("x", "m"), None).argv("go", live=True)
     copilot = agents.Copilot(agents.Persona("x", "m"), None).argv("go", live=True)
     assert "--dangerously-skip-permissions" in claude and "--disallowedTools" not in claude
-    assert "--allow-all-tools" in copilot and "--deny-tool" not in copilot
+    assert "--allow-all" in copilot and "--deny-tool" not in copilot
 
 
 def test_store_and_report_carry_commands(tmp_path):
@@ -66,3 +66,19 @@ def test_store_and_report_carry_commands(tmp_path):
     text = commands_block(runs[0]["commands"])
     assert len(runs[0]["commands"]) == 1
     assert "Commands run (1)" in text and "git status (exit 0, 0.2s)" in text
+
+
+def test_members_show_as_working_while_a_call_is_in_flight(monkeypatch):
+    import asyncio
+
+    seen = []
+
+    async def fake(*argv, cwd=None, timeout=None, env=None, input=None, merge=False):
+        seen.append(agents.Agent.working["Vera"])
+        return 0, "ok", ""
+
+    monkeypatch.setattr(agents, "sh_split", fake)
+    monkeypatch.setattr(agents.Agent, "tracker", None)
+    vera = agents.ClaudeCode(agents.Persona("Vera", "m"), None)
+    asyncio.run(vera.ask("review"))
+    assert seen == [1] and agents.Agent.working["Vera"] == 0

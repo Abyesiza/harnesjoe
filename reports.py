@@ -109,6 +109,6 @@ def scouted(d: dict) -> str:
     return "\n".join([
         f"Ranger — reviewed {d.get('repo', '')} (score {float(d.get('score') or 0):.2f}).",
         f"Result: {_short(d.get('say')) or 'No summary.'}",
-        f"Found: {len(d.get('skills') or [])} skill(s), {len(d.get('lessons') or [])} lesson(s) saved locally.",
+        f"Found: {len(d.get('skills') or [])} skill(s), {len(d.get('lessons') or [])} lesson(s) " + ("saved locally; family members are offered the skills that fit what they are asked." if d.get("saved", True) else "but the score is below the bar, so none were kept."),
         "Next: say “approve <name>” for any proposal you want.",
     ])

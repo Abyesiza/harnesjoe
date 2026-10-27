@@ -102,7 +102,7 @@ def test_accepted_change_is_applied_only_when_repository_is_clean(tmp_path):
     assert not list(work.glob("fam-*"))
 
 
-def test_accepted_change_stays_isolated_when_repository_is_dirty(tmp_path):
+def test_accepted_change_is_applied_even_when_the_repository_has_uncommitted_edits(tmp_path):
     work = tmp_path / "source"
     work.mkdir()
     repo(work)
@@ -119,7 +119,7 @@ def test_accepted_change_stays_isolated_when_repository_is_dirty(tmp_path):
     asyncio.run(bus.emit(Task("add a feature", cwd=str(work))))
 
     assert (work / "user.txt").read_text() == "keep my edit\n"
-    assert not (work / "feature.txt").exists()
+    assert (work / "feature.txt").read_text() == "accepted\n"
 
 
 def test_builders_always_get_a_strict_tool_surface_and_the_need_protocol(tmp_path):
@@ -169,3 +169,18 @@ def test_the_family_is_grand_named_and_has_a_voice_each(tmp_path):
     a = app.build(tmp_path)
     assert set(a.cast) == set(app.P) and a.lead.crew is a.cast
     assert app.line("toss", "x", to="Tess", what="write tests").count("Tess") == 1
+
+
+def test_task_in_a_plain_folder_works_in_place(tmp_path):
+    folder = tmp_path / "plain"
+    folder.mkdir()
+
+    class AddFile(Fake):
+        async def ask(s, text, cwd=".", mcp=None):
+            Path(cwd, "notes.txt").write_text("hello\n")
+            return "Wrote notes."
+
+    bus = Bus()
+    family(bus, [.9], tmp_path, {"a": AddFile("done")}, root=tmp_path / "runtime", apply_accepted=True)
+    asyncio.run(bus.emit(Task("write notes", cwd=str(folder), repo=str(folder))))
+    assert (folder / "notes.txt").read_text() == "hello\n"
