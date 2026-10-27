@@ -170,20 +170,3 @@ def test_report_lists_reads_outside_approved_folders():
     line = reports.run_line(runs)
     # Assert
     assert "Permissions: read outside approved folders: /a, /b/x" in line and "Read /b/x" not in line
-
-
-def test_guard_hook_blocks_secret_reads_and_logs_outside_reads(tmp_path, monkeypatch):
-    # Arrange
-    import famguard
-    monkeypatch.setenv("HOME", str(tmp_path))
-    log = tmp_path / "guard.jsonl"
-    monkeypatch.setenv("FAM_RUN_LOG", str(log))
-    monkeypatch.setenv("FAM_GUARD_DIRS", str(tmp_path / "repo"))
-    monkeypatch.setenv("FAM_GUARD_MODE", "work")
-    (tmp_path / "other").mkdir()
-    # Act
-    secret = famguard.main("pre", json.dumps({"tool_name": "Read", "tool_input": {"file_path": str(tmp_path / ".ssh/id_rsa")}, "cwd": str(tmp_path)}))
-    fine = famguard.main("pre", json.dumps({"tool_name": "Read", "tool_input": {"file_path": str(tmp_path / "other/a.py")}, "cwd": str(tmp_path)}))
-    # Assert
-    rows = [json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
-    assert secret == 2 and fine == 0 and any(r.get("outside") for r in rows)

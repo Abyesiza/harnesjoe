@@ -101,10 +101,10 @@ def test_defers_when_agents_busy(tmp_path):
     bus, rules, sc, seen = make_scout(tmp_path, lambda q: called.append(q) or [], GOOD)
 
     async def go():
-        for _ in range(4):
+        for _ in range(Agent.limit):
             await Agent.sem.acquire()
         await bus.emit(Tick())
-        for _ in range(4):
+        for _ in range(Agent.limit):
             Agent.sem.release()
 
     asyncio.run(go())

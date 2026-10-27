@@ -8,7 +8,6 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol
 
-import shellpolicy
 import sys
 import uuid
 from contextvars import ContextVar
@@ -29,7 +28,7 @@ STRICT_JSON = "Your previous reply could not be parsed. Reply with exactly one J
 WARNING = re.compile(r"^(Permission (deny|allow) rule\b.*|Warning:.*|.*mixes \* with the trailing :\* prefix syntax.*|.*matches no known tool.*)$")
 
 
-GUARD_TIMEOUT = 20  # seconds; the default hook timeout is 10 minutes, so a stuck guard would stall the job
+HOOK_TIMEOUT = 20  # seconds; the default hook timeout is 10 minutes, so a stuck hook would stall the job
 
 
 def strip_warnings(out: str) -> tuple[str, list[str]]:
@@ -144,13 +143,12 @@ class Tracker(Protocol):
 
 
 CURRENT_RUN: ContextVar[str] = ContextVar("fam_run", default="")
-GUARD = Path(__file__).resolve().with_name("famguard.py")
+RUNLOG = Path(__file__).resolve().with_name("runlog.py")
 
 
-def guard_settings() -> str:
-    matcher = "Bash|Read|Glob|Grep|LS|Edit|Write|MultiEdit|NotebookEdit"
-    """Claude settings JSON that routes every Bash call through famguard.py before and after it runs."""
-    hook = lambda stage: [{"matcher": matcher, "hooks": [{"type": "command", "command": f"{shlex_quote(sys.executable)} {shlex_quote(str(GUARD))} {stage}", "timeout": GUARD_TIMEOUT}]}]  # noqa: E731
+def hook_settings() -> str:
+    """Claude settings JSON that records every Bash call through runlog.py (it never blocks)."""
+    hook = lambda stage: [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"{shlex_quote(sys.executable)} {shlex_quote(str(RUNLOG))} {stage}", "timeout": HOOK_TIMEOUT}]}]  # noqa: E731
     return json.dumps({"hooks": {"PreToolUse": hook("pre"), "PostToolUse": hook("post")}})
 
 
@@ -185,7 +183,8 @@ class Agent:
     cmd: tuple[str, ...] = ()
     price = 1.0
     wrap = tuple(os.environ.get("FAM_WRAP", "").split())
-    sem = asyncio.Semaphore(4)
+    limit = int(os.environ.get("FAM_MAX_AGENTS", "32"))  # high enough that chat never waits behind running tasks
+    sem = asyncio.Semaphore(limit)
     ledger = Ledger(float(os.environ.get("FAM_BUDGET", "5")))
     timeout = float(os.environ.get("FAM_AGENT_TIMEOUT", "900"))
     tracker: Tracker | None = None
@@ -198,7 +197,7 @@ class Agent:
     def cli(s) -> str:
         return s.cmd[0] if s.cmd else type(s).__name__.lower()
 
-    def argv(s, prompt: str, mcp: str | None = None, shell: str | None = None) -> list[str]:
+    def argv(s, prompt: str, mcp: str | None = None, live: bool = False) -> list[str]:
         return [*s.cmd, *s.access_args(ACCESS.get()), prompt]
 
     def access_args(s, access: Access) -> list[str]:
@@ -210,14 +209,11 @@ class Agent:
 
     async def once(s, text: str, cwd: str = ".", mcp: str | None = None) -> str:
         prompt = s.prompt(text)
-        access = ACCESS.get()
-        mode = shellpolicy.mode(access.readonly, access.untrusted)
-        dirs = [str(Path(d).resolve()) for d in (cwd, *access.dirs)]
         home = Path(os.environ.get("FAM_HOME", Path.home() / ".fam")).expanduser() / "shell"
         home.mkdir(parents=True, exist_ok=True)
         log = home / f"{CURRENT_RUN.get() or 'adhoc'}-{uuid.uuid4().hex[:6]}.jsonl"
-        env = {**os.environ, "FAM_GUARD_DIRS": os.pathsep.join(dirs), "FAM_GUARD_MODE": mode, "FAM_RUN_LOG": str(log)}
-        argv = [*s.wrap, *s.argv(prompt, mcp, mode)]
+        env = {**os.environ, "FAM_RUN_LOG": str(log)}
+        argv = [*s.wrap, *s.argv(prompt, mcp, live=True)]
         tail = asyncio.create_task(s.follow(log, CURRENT_RUN.get()))
         async with s.sem:
             try:
@@ -313,37 +309,28 @@ class ClaudeCode(Agent):
             out += ["--allowedTools", *CLAUDE_READ, "--disallowedTools", *CLAUDE_WRITE]
         return out
 
-    def argv(s, prompt, mcp=None, shell=None):
+    def argv(s, prompt, mcp=None, live=False):
+        access = ACCESS.get()
+        run = ["--settings", hook_settings(), *([] if access.readonly else ["--dangerously-skip-permissions"])] if live else []
         return [
             *s.cmd,
             *(["--model", s.model] if s.model else []),
             *(["--strict-mcp-config", "--mcp-config", mcp] if mcp else []),
-            *(access := s.shell_args(ACCESS.get(), shell) if shell else s.access_args(ACCESS.get())),
+            *s.access_args(access),
+            *run,
             # Variadic flags such as --allowedTools would otherwise swallow the prompt.
             "--",
             prompt,
         ]
 
 
-    def shell_args(s, access: Access, shell: str) -> list[str]:
-        # Broad reads: the home folder is visible to Read/Glob/Grep; the guard hook refuses secrets and
-        # keeps Edit/Write inside the approved folders, and reports reads outside them.
-        dirs = dict.fromkeys([*access.dirs, *([str(Path.home())] if shell != "off" else [])])
-        return [*(a for d in dirs for a in ("--add-dir", d)), *shellpolicy.claude_flags(shell, guard_settings())]
-
-
 class Copilot(Agent):
     cmd = ("copilot", "-p")
 
-    def argv(s, prompt: str, mcp: str | None = None, shell: str | None = None) -> list[str]:
-        # -p takes the prompt as its value; options follow it. Copilot keeps its own path checks
-        # (cwd plus --add-dir), so files outside the approved folders stay out of reach.
+    def argv(s, prompt: str, mcp: str | None = None, live: bool = False) -> list[str]:
+        # -p takes the prompt as its value; options follow it.
         access = ACCESS.get()
-        if shell:
-            # Copilot has no hooks, so broad reads are only opened in read-only modes where it cannot write.
-            dirs = dict.fromkeys([*access.dirs, *([str(Path.home())] if shell in ("readonly", "inspect") else [])])
-            return [*s.cmd, prompt, *(a for d in dirs for a in ("--add-dir", d)), *shellpolicy.copilot_flags(shell)]
-        return [*s.cmd, prompt, *s.access_args(access)]
+        return [*s.cmd, prompt, *s.access_args(access), *(["--allow-all-tools"] if live and not access.readonly else [])]
 
     def access_args(s, access: Access) -> list[str]:
         out = [a for d in access.dirs for a in ("--add-dir", d)]

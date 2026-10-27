@@ -69,17 +69,7 @@ Research jobs are listed as active work under Quill until findings arrive. If Sk
 
 ### What agents may read, write and run
 
-Agents may **read** almost anything they need, including outside the approved folders. Each such read is announced once in chat (“ℹ️ Forge read /path (read-only, outside the approved folders)”) and listed on a **Permissions:** line in the run and its report. Reads are hard-blocked only for secrets: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.password-store`, `~/.docker`, `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, `~/.fam/token`, `~/.fam/state.sqlite3`, `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers*`, `/root`, `/proc/self/environ`, plus files that look like keys or `.env` files. **Writes, edits and anything that runs code** (builds, tests, scripts, package installs) stay inside the approved folders and only in work jobs. Piping downloads into a shell and destructive commands such as `rm -rf /` are always refused.
-
-Claude Code enforces this through the `famguard.py` hook on Bash and its file tools (Read, Glob, Grep, LS, Edit, Write, MultiEdit, NotebookEdit). Copilot has no hooks, so it only gets home-wide read access in read-only and inspect jobs; in work jobs it stays inside the approved folders.
-
-Shell settings (in `.env` or the environment; restart the daemon after changing them):
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `FAM_SHELL_MODE` | `auto` | `auto` picks per job (research/review = read-only, building = work, untrusted code = inspect). `readonly` forces read-only for every job. `off` disables shell commands. |
-| `FAM_SHELL_ALLOW` | empty | Comma-separated extra command prefixes allowed in read-only jobs, e.g. `make -n,terraform plan`. |
-| `FAM_SHELL_DENY` | empty | Comma-separated command prefixes that are always refused, e.g. `git push,docker`. Deny wins over allow. |
+Task agents run with no shell or file restrictions: Claude Code runs with permissions skipped and Copilot with all tools allowed, so builds, tests, installs and edits work anywhere the user's account can reach. Bash commands are only recorded (by the `runlog.py` hook) and listed in each run and its report. Two read-only cases remain: chat with a family member, and review of untrusted repositories, which can read but never edit or run code.
 
 ### Attachments
 

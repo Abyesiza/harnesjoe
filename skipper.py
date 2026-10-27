@@ -153,6 +153,7 @@ PLAN = (
     "Classify the request and decide the next safe step. Only assign implementation work after the user asks for a concrete software outcome. "
     "Questions should be answered directly. Do not invent that work, tests, or approvals happened. "
     "Choose only one intent: task, status, member_chat, answer_question, research, focus, teach, approve_tool, or answer. "
+    "Every task listed under a member's running list is active at the same time; a new message never pauses or replaces them, and you can answer about any of them. "
     "For tasks choose a builder by capability and current active workload, or leave member empty for automatic routing. "
     "For member_chat choose any family member by key. For approve_tool provide the exact existing proposal name. "
     "When a pending family question exists, use answer_question only if the user's message answers it; put the answer in task. "
@@ -575,6 +576,24 @@ class Skipper:
             return local_projects(f"{text} {task}", s.store.approved_folders())
         return []
 
+    def member_context(s, app, key: str) -> tuple[str, list[str]]:
+        """The member's current tasks (id, text, worktree) and open questions, plus the worktree folders."""
+        lead = app.lead
+        ids = sorted(lead.active[key])
+        waiting = [q for q in s.pending_questions(s.store.events(limit=100000)) if q.get("member") == key]
+        ids += [q["task"]["id"] for q in waiting if q["task"]["id"] not in ids]
+        asked = {q["task"]["id"]: q["text"] for q in waiting}
+        lines, dirs = [], []
+        for task_id in ids:
+            tree = lead.root / "work" / task_id
+            if tree.is_dir():
+                dirs.append(str(tree))
+            note = f" Waiting on the user: {asked[task_id]}" if task_id in asked else ""
+            lines.append(f"- task {task_id}: {lead.tasks.get(task_id, '')[:600]} (worktree {tree}){note}")
+        if not lines:
+            return f"{app.cast[key].persona.name} has no task in progress right now.", dirs
+        return f"{app.cast[key].persona.name}'s current tasks (you are working on these; answer questions about them from this list):\n" + "\n".join(lines), dirs
+
     def no_folder_reply(s, text: str) -> str:
         return ("That sounds like a local project, but I couldn’t find a matching folder in the approved folders or the usual "
                 "project locations, so I haven’t started a web search. Send me its full path (for example /home/you/Projects/name).")
@@ -737,8 +756,9 @@ class Skipper:
             prefix = re.match(rf"^(?:ask|tell|talk to)\s+{re.escape(agent.persona.name)}\s*[:,]?\s*", text, re.IGNORECASE)
             if prefix:
                 ask = text[prefix.end():].strip() or text
-                prompt = f"Answer the user conversationally as {agent.persona.name}. You may run read-only inspection commands inside the approved folders. Do not edit files or start implementation work.\nUser: {ask}"
-                reply = await read_only(agent, prompt, lobby(), s.folders_for(text))
+                context, trees = s.member_context(app, key)
+                prompt = f"Answer the user conversationally as {agent.persona.name}. You may run read-only inspection commands. Do not edit files or start implementation work.\n{context}\nUser: {ask}"
+                reply = await read_only(agent, prompt, lobby(), [*s.folders_for(text), *trees])
                 assistant = s.store.message("member", f"{agent.persona.name}: {reply}")
                 return {"reply": assistant["text"], "task": None, "messages": [user, assistant]}
         members = [
@@ -747,6 +767,7 @@ class Skipper:
                 "name": agent.persona.name,
                 "capability": agent.persona.mission,
                 "active": len(app.lead.active[key]),
+                "running": [{"id": i, "task": app.lead.tasks.get(i, "")[:200]} for i in sorted(app.lead.active[key])],
                 "completed": app.lead.completed[key],
                 "success_rate": app.lead.reward[key] / app.lead.completed[key] if app.lead.completed[key] else 0.5,
                 "can_build": key in app.lead.members,
@@ -788,8 +809,9 @@ class Skipper:
             member = str(plan.get("member", "")).strip().lower()
             if member not in app.cast:
                 raise ValueError("Skipper could not identify which family member you want to speak with.")
-            prompt = f"Answer the user conversationally as {app.cast[member].persona.name}. You may run read-only inspection commands inside the approved folders. Do not edit files.\nUser: {text}"
-            reply = await read_only(app.cast[member], prompt, lobby(), s.folders_for(text))
+            context, trees = s.member_context(app, member)
+            prompt = f"Answer the user conversationally as {app.cast[member].persona.name}. You may run read-only inspection commands. Do not edit files.\n{context}\nUser: {text}"
+            reply = await read_only(app.cast[member], prompt, lobby(), [*s.folders_for(text), *trees])
             assistant = s.store.message("member", f"{app.cast[member].persona.name}: {reply}")
             return {"reply": assistant["text"], "task": None, "messages": [user, assistant]}
         elif intent == "answer_question":
