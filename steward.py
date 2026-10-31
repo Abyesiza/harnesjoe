@@ -45,7 +45,7 @@ class Steward(Node):
             except Exception as e:  # noqa: BLE001 - the original prompt to the user stays pending
                 log.warning("steward on %s failed: %s", task_id, e)
 
-        job = asyncio.create_task(run())
+        job = asyncio.create_task(run(), name=task_id)
         s.jobs.add(job)
         job.add_done_callback(s.jobs.discard)
 

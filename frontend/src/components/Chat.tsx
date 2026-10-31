@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent } from "react";
+import FaceAvatar from "./FaceAvatar";
 import { api, type Attachment } from "@/lib/api";
 import type { Console } from "@/lib/useConsole";
 
@@ -86,6 +87,7 @@ export default function Chat({ c }: { c: Console }) {
       <div className="messages" ref={log} role="log" aria-live="polite" aria-label="Messages" tabIndex={0}>
         {lines.length === 0 && (
           <div className="empty">
+            <span className="orb" aria-hidden="true" />
             <strong>The log is empty.</strong>
             Tell Skipper what you want done. Work is assigned to the crew, and each step lands here.
           </div>
@@ -94,13 +96,12 @@ export default function Chat({ c }: { c: Console }) {
           {lines.map((m) =>
             m.role === "event" ? (
               <li key={m.id} className="entry event">
-                <span className="mark" aria-hidden="true" />
                 <p>{m.text}</p>
               </li>
             ) : (
               <li key={m.id} className={"entry " + m.role}>
-                <span className="mark" aria-hidden="true" />
                 <div className="head">
+                  {m.role !== "user" && <FaceAvatar id={m.role} state="neutral" size={22} />}
                   <b>{who[m.role] ?? m.role}</b>
                   {m.ts && <time dateTime={new Date(m.ts * 1000).toISOString()}>{new Date(m.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>}
                 </div>
@@ -133,7 +134,7 @@ export default function Chat({ c }: { c: Console }) {
           </button>
           <input ref={picker} type="file" multiple hidden onChange={(e) => { attach([...(e.target.files ?? [])]); e.target.value = ""; }} />
           <textarea ref={input} aria-label="Message to Skipper" aria-describedby="hint" placeholder="What outcome do you want?" maxLength={8000} required value={text} readOnly={busy} onChange={(e) => setText(e.target.value)} onKeyDown={onKey} onPaste={onPaste} />
-          <button type="submit" className="btn primary" disabled={busy} onMouseDown={(e) => e.preventDefault()}>
+          <button type="submit" className="btn primary" aria-disabled={busy || !text.trim() || undefined} data-busy={busy || undefined} onMouseDown={(e) => e.preventDefault()}>
             {busy ? <span className="spinner" aria-hidden="true" /> : <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>}
             Send
           </button>

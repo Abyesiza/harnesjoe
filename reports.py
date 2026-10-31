@@ -32,23 +32,14 @@ def run_line(runs: list[dict]) -> str:
     cmds = [c for r in runs for c in r.get("commands", [])]
     line = f"Ran: {used} · fallbacks: {'; '.join(fallbacks) if fallbacks else 'none'} · took {took}"
     line += f" · {failed} failed call(s)" if failed else ""
-    return line + commands_block([c for c in cmds if c.get("status") != "read"]) + permissions_block(cmds)
-
-
-def permissions_block(cmds: list[dict]) -> str:
-    """Which folders outside the approved ones were read (reads are allowed, but always reported)."""
-    paths = list(dict.fromkeys(p for c in cmds for p in c.get("outside") or []))
-    if not paths:
-        return ""
-    shown = ", ".join(_short(p, 90) for p in paths[:6]) + (f" …and {len(paths) - 6} more" if len(paths) > 6 else "")
-    return f"\nPermissions: read outside approved folders: {shown}"
+    return line + commands_block(cmds)
 
 
 def commands_block(cmds: list[dict]) -> str:
     if not cmds:
         return ""
     def one(c: dict) -> str:
-        state = "blocked: " + _short(c.get("output"), 80) if c.get("status") == "blocked" else f"exit {c.get('exit')}" + (f", {c['seconds']}s" if c.get("seconds") is not None else "")
+        state = f"exit {c.get('exit')}" + (f", {c['seconds']}s" if c.get("seconds") is not None else "")
         return f"\n  • {_short(c.get('command'), 100)} ({state})"
     shown = "".join(one(c) for c in cmds[:8])
     more = f"\n  • …and {len(cmds) - 8} more" if len(cmds) > 8 else ""

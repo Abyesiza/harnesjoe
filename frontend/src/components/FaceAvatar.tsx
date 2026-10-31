@@ -1,6 +1,15 @@
-import type { CSSProperties } from "react";
+"use client";
+import { useEffect, type CSSProperties } from "react";
 
-type State = "idle" | "working" | "talking";
+type State = "idle" | "working" | "talking" | "neutral";
+
+let users = 0;
+const follow = (e: PointerEvent) => {
+  const r = document.documentElement;
+  const k = (v: number, n: number) => Math.max(-1, Math.min(1, (v - n / 2) / (n / 2))) * 1.6;
+  r.style.setProperty("--px", String(k(e.clientX, innerWidth)));
+  r.style.setProperty("--py", String(k(e.clientY, innerHeight)));
+};
 
 const SHAPES = {
   round: "M20 2a18 18 0 1 1 0 36a18 18 0 1 1 0-36z",
@@ -14,16 +23,17 @@ const SHAPES = {
 const PERSONAS: Record<string, { shape: keyof typeof SHAPES; fill: string; look: number; blink: number }> = {
   skipper: { shape: "squircle", fill: "var(--accent)", look: 6, blink: 4 },
   steward: { shape: "tri", fill: "var(--member)", look: 4, blink: 3 },
-  quill: { shape: "oval", fill: "var(--ok)", look: 9, blink: 5 },
-  sage: { shape: "round", fill: "var(--warn)", look: 7, blink: 3.5 },
-  pip: { shape: "drop", fill: "var(--danger)", look: 5, blink: 6 },
-  blue: { shape: "hex", fill: "var(--ink)", look: 8, blink: 4.5 },
+  quill: { shape: "oval", fill: "var(--av-1)", look: 9, blink: 5 },
+  sage: { shape: "round", fill: "var(--av-2)", look: 7, blink: 3.5 },
+  pip: { shape: "drop", fill: "var(--av-3)", look: 5, blink: 6 },
+  blue: { shape: "hex", fill: "var(--av-4)", look: 8, blink: 4.5 },
 };
 
 const FALLBACK = Object.values(PERSONAS);
 
 const CSS = `
 .fa .look{animation:fa-look var(--look) ease-in-out infinite}
+.fa.track .look{animation:none;transform:translate(calc(var(--px,0)*1px),calc(var(--py,0)*1px))}
 .fa .blink{transform-box:fill-box;transform-origin:center;animation:fa-blink var(--blink) linear infinite}
 .fa ellipse{fill:var(--on-accent)}
 .fa .mouth{fill:none;stroke:var(--on-accent);stroke-width:2.4;stroke-linecap:round}
@@ -32,14 +42,21 @@ const CSS = `
 @keyframes fa-look{0%,100%{transform:translateX(0)}25%{transform:translateX(-1.5px)}75%{transform:translateX(1.5px)}}
 @keyframes fa-blink{0%,92%,100%{transform:scaleY(1)}95%{transform:scaleY(.1)}}
 @keyframes fa-talk{0%,100%{transform:scaleY(.25)}50%{transform:scaleY(1)}}
-@media (prefers-reduced-motion:reduce){.fa *{animation:none!important}}
+@media (prefers-reduced-motion:reduce){.fa *{animation:none!important}.fa.track .look{transform:none}}
 `;
 
-export default function FaceAvatar({ id, name, state, size = 36 }: { id: string; name: string; state: State; size?: number }) {
+export default function FaceAvatar({ id, state, size = 36 }: { id: string; state: State; size?: number }) {
   const p = PERSONAS[id] ?? FALLBACK[[...id].reduce((n, c) => n + c.charCodeAt(0), 0) % FALLBACK.length];
+  useEffect(() => {
+    if (matchMedia("(prefers-reduced-motion:reduce)").matches) return;
+    if (users++ === 0) addEventListener("pointermove", follow);
+    return () => {
+      if (--users === 0) removeEventListener("pointermove", follow);
+    };
+  }, []);
   return (
     <svg
-      className="fa"
+      className="fa track"
       data-member={id}
       data-state={state}
       viewBox="0 0 40 40"
@@ -48,7 +65,6 @@ export default function FaceAvatar({ id, name, state, size = 36 }: { id: string;
       aria-hidden="true"
       style={{ "--look": `${p.look}s`, "--blink": `${p.blink}s`, flex: "none" } as CSSProperties}
     >
-      <title>{name}</title>
       <style>{CSS}</style>
       <path d={SHAPES[p.shape]} fill={p.fill} stroke={p.fill} strokeWidth={3} strokeLinejoin="round" />
       <g className="look">
@@ -57,7 +73,7 @@ export default function FaceAvatar({ id, name, state, size = 36 }: { id: string;
           <ellipse cx="26" cy="18" rx="2.6" ry="3.2" />
         </g>
       </g>
-      <path className="mouth" d="M14 27q6 5 12 0" />
+      <path className="mouth" d={state === "neutral" ? "M15 28h10" : "M14 27q6 5 12 0"} />
     </svg>
   );
 }

@@ -31,7 +31,7 @@ export default function Header({ connection, repo, setRepo, onFolders, onStatus 
         Skipper
       </h1>
       <span role="status" className={styles.connection} data-state={connection}>{connection === "connected" ? "Connected" : connection === "reconnecting" ? "Reconnecting…" : "Connecting…"}</span>
-      <span className={styles.grow} />
+      <span className="grow" />
       <input className={styles.repo} aria-label="Selected project folder" title="Selected project folder" placeholder="Project folder" value={repo} onChange={(e) => setRepo(e.target.value)} />
       <button type="button" className={styles.action} onClick={onFolders}>Folders &amp; access</button>
       <button type="button" className={styles.action} onClick={onStatus}>Status</button>

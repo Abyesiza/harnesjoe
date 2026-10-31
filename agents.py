@@ -1,28 +1,28 @@
 import asyncio
-import time
 import json
+import logging
 import os
+import re
+import shlex
+import shutil
+import sys
+import time
+import uuid
 from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol
 
-import sys
-import uuid
-from contextvars import ContextVar
-
-import logging
-import re
-
 import skills
-
-from core import ACCESS, Access, Correction, Lesson, Node, jsonin, on, sh, sh_split
-
-log = logger = logging.getLogger("fam.agents")
+from core import ACCESS, Access, Correction, Lesson, Node, jsonin, on, sh_split
 from mind import enc
 
+log = logging.getLogger("fam.agents")
+
 PRICE = {"claude-haiku-5-5": 0.10, "claude-sonnet-5-5": 2.0, "claude-opus-5-5": 4.0}
+RESERVE = float(os.environ.get("FAM_CALL_RESERVE", "0.5"))  # USD each running call holds against the cap
 
 
 STRICT_JSON = "Your previous reply could not be parsed. Reply with exactly one JSON object and nothing else: no prose, no code fences, no second object."
@@ -61,30 +61,52 @@ class AgentError(ValueError):
 
 
 class Ledger:
-    """Estimated spend (tokens ≈ characters / 4) against a daily cap. Persisted when attached to a
-    file, so a restart no longer resets the figure to $0; a new local day starts from zero."""
+    """Model spend against a hard cap: exact when the CLI reports its cost, else estimated (tokens ≈ characters / 4).
+    Each running call holds a reserve, so parallel calls cannot jointly overshoot. Every charge and refusal is
+    appended to <ledger>.jsonl. A daily ledger starts from zero each local day; a run ledger never resets."""
 
-    def __init__(s, cap):
-        s.cap, s.spent, s.path, s.day = cap, 0.0, None, time.strftime("%Y-%m-%d")
+    def __init__(s, cap, daily=True):
+        s.cap, s.spent, s.held, s.path, s.daily, s.day = cap, 0.0, 0.0, None, daily, time.strftime("%Y-%m-%d")
 
     def attach(s, path) -> None:
         s.path = Path(path)
         try:
             data = json.loads(s.path.read_text())
-            if data.get("day") == s.day:
+            if data.get("day") == s.day or not s.daily:
                 s.spent = float(data.get("spent", 0.0))
         except (OSError, ValueError, TypeError):
             pass
 
-    def charge(s, price, tin, tout):
-        if (today := time.strftime("%Y-%m-%d")) != s.day:
+    def roll(s):
+        if s.daily and (today := time.strftime("%Y-%m-%d")) != s.day:
             s.day, s.spent = today, 0.0
-        s.spent += (tin + 5 * tout) * price / 1e6
+
+    def hold(s, usd, who=""):
+        s.roll()
+        if s.spent + s.held + usd > s.cap:
+            s.record({"refused": who, "reserve": usd, "held": round(s.held, 4)})
+            raise OverBudget(f"budget cap ${s.cap:.2f} reached: spent ${s.spent:.4f}, ${s.held:.2f} held by running calls")
+        s.held += usd
+
+    def charge(s, usd, held=0.0, who="", exact=False):
+        s.roll()
+        s.held = max(0.0, s.held - held)
+        s.spent += usd
+        s.record({"who": who, "usd": round(usd, 6), "exact": exact})
         if s.path:
             try:
-                s.path.write_text(json.dumps({"day": s.day, "spent": s.spent}))
+                s.path.write_text(json.dumps({"day": s.day, "spent": s.spent, "cap": s.cap}))
             except OSError as e:
                 log.warning("could not save the budget ledger: %s", e)
+
+    def record(s, row):
+        if not s.path:
+            return
+        try:
+            with s.path.with_suffix(".jsonl").open("a") as f:
+                f.write(json.dumps({"ts": time.time(), **row, "spent": round(s.spent, 6), "cap": s.cap}) + "\n")
+        except OSError as e:
+            log.warning("could not log spend: %s", e)
 
     @property
     def over(s):
@@ -150,14 +172,8 @@ RUNLOG = Path(__file__).resolve().with_name("runlog.py")
 
 def hook_settings() -> str:
     """Claude settings JSON that records every Bash call through runlog.py (it never blocks)."""
-    hook = lambda stage: [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"{shlex_quote(sys.executable)} {shlex_quote(str(RUNLOG))} {stage}", "timeout": HOOK_TIMEOUT}]}]  # noqa: E731
+    hook = lambda stage: [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(RUNLOG))} {stage}", "timeout": HOOK_TIMEOUT}]}]  # noqa: E731
     return json.dumps({"hooks": {"PreToolUse": hook("pre"), "PostToolUse": hook("post")}})
-
-
-def shlex_quote(s: str) -> str:
-    import shlex
-
-    return shlex.quote(s)
 
 
 def merge_commands(lines: list[dict]) -> list[dict]:
@@ -165,13 +181,8 @@ def merge_commands(lines: list[dict]) -> list[dict]:
     out: dict[str, dict] = {}
     for i, e in enumerate(lines):
         key = e.get("use") or f"n{i}"
-        row = out.setdefault(key, {"command": e.get("command", ""), "cwd": e.get("cwd", ""), "started": e.get("ts"), "exit": None, "output": "", "status": "running", "outside": []})
-        row["outside"] = list(dict.fromkeys([*row["outside"], *e.get("outside", [])]))
-        if e.get("tool") and e.get("allowed", True):  # a file read outside the approved folders: no post record follows
-            row.update(status="read", ended=e.get("ts"))
-        if e.get("stage") == "pre" and not e.get("allowed", True):
-            row.update(status="blocked", output=e.get("reason", ""), exit=None, ended=e.get("ts"))
-        elif e.get("stage") == "post":
+        row = out.setdefault(key, {"command": e.get("command", ""), "cwd": e.get("cwd", ""), "started": e.get("ts"), "exit": None, "output": "", "status": "running"})
+        if e.get("stage") == "post":
             row.update(exit=e.get("exit"), output=str(e.get("output", ""))[-1000:], ended=e.get("ts"), status="done" if e.get("exit") in (0, None) else "failed")
             if row.get("started") is None:
                 row["started"] = e.get("ts")
@@ -183,6 +194,7 @@ def merge_commands(lines: list[dict]) -> list[dict]:
 
 class Agent:
     cmd: tuple[str, ...] = ()
+    stdin = False  # prompt goes on stdin instead of argv (cmd.exe caps a command line at 8191 characters)
     price = 1.0
     wrap = tuple(os.environ.get("FAM_WRAP", "").split())
     limit = int(os.environ.get("FAM_MAX_AGENTS", "32"))  # high enough that chat never waits behind running tasks
@@ -208,6 +220,9 @@ class Agent:
     def access_args(s, access: Access) -> list[str]:
         return []
 
+    def read(s, out: str) -> tuple[str, float | None]:
+        """The answer text and the exact USD cost when the CLI reports one."""
+        return out, None
     def prompt(s, text: str) -> str:
         rules = s.rules.active if s.rules else ()
         extra = skills.block(s.skills_root, text) if s.skills_root else ""
@@ -218,29 +233,34 @@ class Agent:
         prompt = s.prompt(text)
         home = Path(os.environ.get("FAM_HOME", Path.home() / ".fam")).expanduser() / "shell"
         home.mkdir(parents=True, exist_ok=True)
-        log = home / f"{CURRENT_RUN.get() or 'adhoc'}-{uuid.uuid4().hex[:6]}.jsonl"
-        env = {**os.environ, "FAM_RUN_LOG": str(log)}
+        trail = home / f"{CURRENT_RUN.get() or 'adhoc'}-{uuid.uuid4().hex[:6]}.jsonl"
+        env = {**os.environ, "FAM_RUN_LOG": str(trail)}
         argv = [*s.wrap, *s.argv(prompt, mcp, live=True)]
-        tail = asyncio.create_task(s.follow(log, CURRENT_RUN.get()))
+        argv[0] = shutil.which(argv[0]) or argv[0]  # claude.cmd / copilot.cmd on Windows
+        who = f"{s.persona.name} {s.cli} {s.model}".strip()
+        out, err, usd = "", "", None
         async with s.sem:
+            s.ledger.hold(RESERVE, who)
+            tail = asyncio.create_task(s.follow(trail, CURRENT_RUN.get()))
             try:
-                rc, out, err = await sh_split(*argv, cwd=cwd, timeout=s.timeout, env=env)
+                rc, out, err = await sh_split(*argv, cwd=cwd, input=prompt if s.stdin else None, timeout=s.timeout, env=env)
+                out, warned = strip_warnings(out)
+                out, usd = s.read(out)
             except TimeoutError as e:
                 raise AgentError(f"{s.cli} timed out after {s.timeout:.0f}s") from e
             except OSError as e:
                 raise AgentError(f"could not start {s.cli}: {e}") from e
             finally:
                 tail.cancel()
-                await s.flush(log, CURRENT_RUN.get())
-        out, warned = strip_warnings(out)
+                await s.flush(trail, CURRENT_RUN.get())
+                s.ledger.charge(usd if usd is not None else s.price * (len(prompt) + 5 * len(out)) / 4e6, RESERVE, who, usd is not None)
         for line in [*warned, *err.splitlines()]:
             if line.strip():
-                logger.warning("%s: %s", s.cli, line.strip()[:300])
+                log.warning("%s: %s", s.cli, line.strip()[:300])
         if rc:
             raise AgentError(short_reason(s.cli, rc, err, out))
         if not out.strip():
             raise AgentError(f"{s.cli} returned no output")
-        s.ledger.charge(s.price, len(prompt) / 4, len(out) / 4)
         return out
 
     async def follow(s, log: Path, run_id: str) -> None:
@@ -320,6 +340,7 @@ CLAUDE_WEB = ("WebSearch", "WebFetch", *(f"Bash({c}:*)" for c in WEB_SHELL))
 
 class ClaudeCode(Agent):
     cmd = ("claude", "-p")
+    stdin = True
 
     def access_args(s, access: Access) -> list[str]:
         out = [a for d in access.dirs for a in ("--add-dir", d)]
@@ -332,14 +353,24 @@ class ClaudeCode(Agent):
         run = ["--settings", hook_settings(), *([] if access.readonly else ["--dangerously-skip-permissions"])] if live else []
         return [
             *s.cmd,
+            "--output-format",
+            "json",
             *(["--model", s.model] if s.model else []),
             *(["--strict-mcp-config", "--mcp-config", mcp] if mcp else []),
             *s.access_args(access),
             *run,
-            # Variadic flags such as --allowedTools would otherwise swallow the prompt.
-            "--",
-            prompt,
         ]
+
+    def read(s, out):
+        for raw in (out, *reversed(out.splitlines())):
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and "result" in d:
+                cost = d.get("total_cost_usd")
+                return str(d.get("result") or ""), float(cost) if cost is not None else None
+        return out, None
 
 
 class Copilot(Agent):

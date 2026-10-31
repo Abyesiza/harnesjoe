@@ -6,7 +6,7 @@ from collections import Counter
 import numpy as np
 
 from agents import Agent
-from core import Briefed, Bus, Node, Output, Task, on
+from core import Briefed, Bus, Node, Task, on
 from craft import Expert
 from family import Judge, Lead, Panel, Suite
 from mind import Brain
@@ -25,6 +25,7 @@ DRAFT = {"goal": "Ship it.", "verify": ["Run pytest -q"], "unasked": ["Add a rol
 class World:
     def __init__(s, seed):
         s.rng, s.truth, s.kinds, s.cost, s.calls, s.by = np.random.default_rng(seed), {}, {}, 0.0, Counter(), Counter()
+        s.attempts = {}
 
     def bill(s, role, price, tin, tout):
         s.cost += (tin + 5 * tout) * price / 1e6
@@ -47,6 +48,7 @@ class SimAgent(Agent):
         kind = s.world.kinds[text.split("\n")[0]]
         ok = bool(s.world.rng.random() < SKILL[s.tier][1][list(POOLS).index(kind)])
         s.world.truth[cwd.rsplit("/")[-1]] = ok
+        s.world.attempts.setdefault(cwd.rsplit("/")[-1], []).append((s.tier, ok))
         return "ok" if ok else "fail"
 
 
@@ -92,7 +94,7 @@ class Fixed(Brain):
 
 
 async def episode(policy, n=900, seed=7, lam=0.75, tries=3, tau=0.6, expert=True):
-    world, bus, runs, briefs = World(seed), Bus(), {}, []
+    world, bus, briefs = World(seed), Bus(), []
     members = {t: SimAgent(world, t) for t in SKILL}
     brain = Fixed(list(SKILL), policy) if policy else Brain(list(SKILL))
     brain.rng = np.random.default_rng(seed)
@@ -104,10 +106,6 @@ async def episode(policy, n=900, seed=7, lam=0.75, tries=3, tau=0.6, expert=True
     Judge(bus, 3)
 
     class Tap(Node):
-        @on(Output)
-        async def out(s, o):
-            runs.setdefault(o.task.id.rstrip("+"), []).append((o.member, o.task.id))
-
         @on(Briefed)
         async def brief(s, b):
             briefs.append((b.cached, b.brief["role"] == world.kinds[b.task.text]))
@@ -118,9 +116,9 @@ async def episode(policy, n=900, seed=7, lam=0.75, tries=3, tau=0.6, expert=True
         await bus.emit(Task(world.text(kinds[world.rng.integers(len(kinds))])))
         spent.append(world.cost)
     wall = time.perf_counter() - t0
-    done = list(runs.values())
-    final = np.array([world.truth[r[-1][1]] for r in done])
-    first = np.array([world.truth[r[0][1]] for r in done])
+    done = list(world.attempts.values())
+    final = np.array([r[-1][1] for r in done])
+    first = np.array([r[0][1] for r in done])
     w = n // 3
     hits = [ok for c, ok in briefs if c]
     return {

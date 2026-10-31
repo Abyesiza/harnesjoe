@@ -62,14 +62,6 @@ class Brain:
         hot = np.eye(len(s.opt), dtype=np.float32)[s.m]
         return 1 + (k * s.r) @ hot, 1 + (k * (1 - s.r)) @ hot
 
-    def mean(s, x):
-        a, b = s.ab(x)
-        return a / (a + b)
-
-    def lcb(s, x, z=2.0):
-        a, b = s.ab(x)
-        return a / (a + b) - z * np.sqrt(a * b / ((a + b) ** 2 * (a + b + 1)))
-
     def pick(s, x):
         return s.opt[int(np.argmax(s.rng.beta(*s.ab(x))))]
 

@@ -9,6 +9,7 @@ export default function FolderDialog({ open, onClose, folders, refreshFolders, s
   const dialog = useRef<HTMLDialogElement>(null);
   const [path, setPath] = useState("");
   const [browse, setBrowse] = useState<Browse | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     const d = dialog.current;
@@ -22,7 +23,7 @@ export default function FolderDialog({ open, onClose, folders, refreshFolders, s
 
   const trap = (e: KeyboardEvent) => {
     if (e.key !== "Tab") return;
-    const all = [...dialog.current!.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex='-1'])")];
+    const all = [...dialog.current!.querySelectorAll<HTMLElement>("a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex='-1'])")];
     const edge = e.shiftKey ? all[0] : all[all.length - 1];
     if (document.activeElement !== edge) return;
     e.preventDefault();
@@ -40,7 +41,15 @@ export default function FolderDialog({ open, onClose, folders, refreshFolders, s
     });
   };
 
-  const open_ = (p: string) => run(async () => setBrowse(await api.browse(p)));
+  const open_ = (p: string) =>
+    run(async () => {
+      setLoading(true);
+      try {
+        setBrowse(await api.browse(p));
+      } finally {
+        setLoading(false);
+      }
+    });
 
   const use = (p: string) =>
     run(async () => {
@@ -53,7 +62,7 @@ export default function FolderDialog({ open, onClose, folders, refreshFolders, s
     <dialog ref={dialog} aria-labelledby="folder-title" onClose={onClose} onKeyDown={trap} onClick={(e) => e.target === dialog.current && onClose()}>
       <div className="dialog">
         <div className="dialog-head">
-          <h2 id="folder-title">Project folders and access</h2>
+          <h2 id="folder-title" className="title">Project folders and access</h2>
           <span className="grow" />
           <button type="button" onClick={onClose}>Close</button>
         </div>
@@ -68,15 +77,17 @@ export default function FolderDialog({ open, onClose, folders, refreshFolders, s
             <button type="button" onClick={() => run(async () => { await api.approveFolder(f.id); await refreshFolders(); })}>Approve access</button>
           </div>
         ))}
-        <h2>Approved folders</h2>
+        <h2 className="label">Approved folders</h2>
         {folders.approved.map((p) => (
           <div key={p} className="folder-row">
             <span>{p}</span>
             <button type="button" onClick={() => open_(p)}>Browse</button>
           </div>
         ))}
-        <h2>Browse approved folder</h2>
+        {!folders.approved.length && <p className="dim">No approved folders yet. Request one above, then approve it to browse here.</p>}
+        <h2 className="label">Browse approved folder</h2>
         <div className="dim" aria-live="polite">{browse?.path ?? "Choose an approved folder above."}</div>
+        {loading && <p className="dim" role="status">Loading folder…</p>}
         <div className="browse">
           {browse?.entries.map((en) => (
             <div key={en.path} className="folder-row">

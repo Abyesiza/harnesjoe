@@ -43,7 +43,7 @@ def main(stage: str, raw: str) -> int:
     cwd = str(event.get("cwd") or os.getcwd())
     use = str(event.get("tool_use_id") or "")
     if stage == "pre":
-        _log({"stage": "pre", "use": use, "command": command[:500], "cwd": cwd, "ts": time.time(), "allowed": True, "outside": []})
+        _log({"stage": "pre", "use": use, "command": command[:500], "cwd": cwd, "ts": time.time()})
         return 0
     resp = event.get("tool_response") or {}
     if not isinstance(resp, dict):

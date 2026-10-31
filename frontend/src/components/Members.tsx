@@ -1,12 +1,24 @@
+import type { PointerEvent } from "react";
+import FaceAvatar from "./FaceAvatar";
 import type { Member } from "@/lib/api";
 import { sortMembers } from "@/lib/agents";
 import type { Console } from "@/lib/useConsole";
 
 function MemberCard({ m }: { m: Member }) {
   const task = m.active_tasks?.join(", ") || "assigned task";
+  const tilt = (e: PointerEvent<HTMLLIElement>) => {
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    e.currentTarget.style.setProperty("--rx", String((0.5 - (e.clientY - r.top) / r.height) * 10));
+    e.currentTarget.style.setProperty("--ry", String(((e.clientX - r.left) / r.width - 0.5) * 12));
+  };
+  const flat = (e: PointerEvent<HTMLLIElement>) => {
+    e.currentTarget.style.removeProperty("--rx");
+    e.currentTarget.style.removeProperty("--ry");
+  };
   return (
-    <li className={m.available ? "member" : "member busy"}>
-      <span className="glyph" aria-hidden="true">{m.name[0]}</span>
+    <li className={m.available ? "card" : "card busy"} onPointerMove={tilt} onPointerLeave={flat}>
+      <FaceAvatar id={m.name.toLowerCase()} state={m.available ? "idle" : "working"} />
       <div>
         <strong>{m.name}</strong>
         <p>{m.role}</p>
@@ -37,8 +49,8 @@ export default function Crew({ c }: { c: Console }) {
           <ul className="members">
             {working.map((m) => <MemberCard key={m.name} m={m} />)}
             {jobs.map((j) => (
-              <li key={j.id} className="member busy">
-                <span className="glyph" aria-hidden="true">Q</span>
+              <li key={j.id} className="card busy">
+                <FaceAvatar id="quill" state="working" />
                 <div>
                   <strong>Quill · research {j.id}</strong>
                   <p>{j.question}</p>

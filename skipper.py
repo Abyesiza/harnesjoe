@@ -9,16 +9,19 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 import skills
-from core import ACCESS, Access, Approve, Consulted, HumanAnswer, ResearchRequest, Task
+from core import ACCESS, Access, Approve, Consulted, Correction, Focus, HumanAnswer, ResearchRequest, Task
 from link import ready
 
 INTENTS = {"task", "status", "member_chat", "answer_question", "research", "focus", "teach", "approve_tool", "answer", "consult", "note"}
 LIMITS = {"intent": 40, "task": 8000, "member": 120, "reply": 4000, "name": 200}
 SYSTEM = {"/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var", "/home", "/snap", "/mnt", "/media"}
 SENSITIVE = {".ssh", ".gnupg", ".aws", ".kube", ".password-store", ".fam"}
-QUOTED = re.compile(r"[\"'`“”‘’]((?:~|/)[^\"'`“”‘’\n]+)[\"'`“”‘’]")
-PATH_START = re.compile(r"(?<![\w/])(?:~/|/)")
+WINDOWS = [Path(os.environ[v]) for v in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData") if os.environ.get(v)]
+ROOT = r"(?:~[\\/]?|/|[A-Za-z]:[\\/]|\\\\)"  # ~/x, /x, C:\x or C:/x, \\server\share
+QUOTED = re.compile(rf"[\"'`“”‘’]({ROOT}[^\"'`“”‘’\n]+)[\"'`“”‘’]")
+PATH_START = re.compile(rf"(?<![\w/\\]){ROOT}")
 TRAILING = ".,:;!?)]}"
+WRITE_ASK = re.compile(r"\b(edit|write|change|fix|create|add|delete|remove|rename|move|update|modify|refactor|implement|save|replace|clean ?up)\b", re.I)
 
 
 def clean_plan(plan: object) -> dict[str, str]:
@@ -36,16 +39,22 @@ def safe_folder(raw: str) -> Path:
     """Resolve a user-named folder and refuse system or credential locations."""
     path = Path(raw).expanduser()
     if not path.is_absolute():
-        raise ValueError("Use an absolute folder path, such as /home/you/Projects/app.")
+        raise ValueError("Use an absolute folder path, such as C:\\Users\\you\\Projects\\app or /home/you/Projects/app.")
     path = path.resolve()
+    if path.is_file():
+        path = path.parent
     if not path.is_dir():
         raise ValueError(f"{path} is not an accessible directory.")
-    if str(path) in SYSTEM or path == Path.home().resolve():
+    if str(path) in SYSTEM or path == Path.home().resolve() or path == Path(path.anchor):
         raise ValueError(f"{path} is too broad or a system folder; choose a project folder inside it.")
     work = Path(os.environ.get("FAM_HOME", Path.home() / ".fam")).expanduser().resolve() / "work"  # task worktrees hold no secrets
     if work in path.parents:
         return path
-    if any(part in SENSITIVE for part in path.parts) or any(str(path).startswith(s + "/") for s in SYSTEM - {"/", "/home", "/tmp", "/mnt", "/media", "/srv", "/opt"}):
+    if (
+        any(part in SENSITIVE for part in path.parts)
+        or any(str(path).startswith(s + "/") for s in SYSTEM - {"/", "/home", "/tmp", "/mnt", "/media", "/srv", "/opt"})
+        or any(path == w or w in path.parents for w in WINDOWS)
+    ):
         raise ValueError(f"{path} is a protected location.")
     return path
 
@@ -75,8 +84,13 @@ def is_research_followup(text: str) -> bool:
 
 
 def _as_dir(raw: str) -> str | None:
+    """The folder a raw path names; a file counts as its folder, so “fix C:\\app\\main.py” works in C:\\app."""
     candidate = Path(raw.strip().rstrip(TRAILING)).expanduser()
-    return str(candidate) if candidate.is_absolute() and candidate.is_dir() else None
+    if not candidate.is_absolute():
+        return None
+    if candidate.is_file():
+        candidate = candidate.parent
+    return str(candidate) if candidate.is_dir() else None
 
 
 def folders_in(text: str) -> list[str]:
@@ -98,9 +112,9 @@ def folders_in(text: str) -> list[str]:
     return found
 
 
-async def read_only(agent, prompt: str, cwd: str, folders: list[str]) -> str:
-    """Ask a member a question with read-only access to the folders the user named."""
-    token = ACCESS.set(Access(tuple(folders), readonly=True))
+async def read_only(agent, prompt: str, cwd: str, folders: list[str], write: bool = False) -> str:
+    """Ask a member something with access to the folders the user named: read-only unless the user asked for changes."""
+    token = ACCESS.set(Access(tuple(folders), readonly=not write))
     try:
         return await agent.ask(prompt, folders[0] if folders else cwd)
     finally:
@@ -121,7 +135,7 @@ CONSULT_ASK = re.compile(r"\b(verif\w*|test\w*|review|validate|audit|confirm|dou
 FOUND = re.compile(r"\bwhat (?:did |has |have )?(\w+) (?:find|found|say|said|conclude|concluded|report|reported)\b", re.I)
 MODEL_Q = re.compile(r"\b(?:which|what) (?:model|llm|cli)s?\b.*?\b(?:does|do|is|for|of)\s+(\w+)|\b(\w+)(?:'s|’s) model\b", re.I)
 LOCAL_HINT = re.compile(r"\b(project|folder|foldr|repo|repository|codebase|directory|dir)\b", re.I)
-SEARCH_ROOTS = ("Desktop", "Desktop/my_projects", "Downloads", "Projects", "projects", "code", "src", "dev", "work", "repos", "")
+SEARCH_ROOTS = ("Desktop", "Desktop/my_projects", "Documents", "Downloads", "Projects", "projects", "code", "src", "dev", "work", "repos", "source/repos", "")
 STOP = {"the", "a", "an", "my", "our", "this", "that", "project", "folder", "foldr", "repo", "codebase", "read", "through", "lets", "let", "do", "look", "into", "at", "of", "in", "on", "for", "and"}
 
 
@@ -138,7 +152,9 @@ def local_projects(text: str, approved: list[str]) -> list[str]:
     if found:
         return found
     home = Path.home()
-    for root in SEARCH_ROOTS:
+    # OneDrive moves Desktop and Documents under ~/OneDrive*/ on Windows.
+    roots = [*SEARCH_ROOTS, *(f"{d.name}/{r}" for d in home.glob("OneDrive*") if d.is_dir() for r in ("Desktop", "Documents", ""))]
+    for root in roots:
         base = home / root
         try:
             kids = sorted(base.iterdir()) if base.is_dir() else []
@@ -150,11 +166,6 @@ def local_projects(text: str, approved: list[str]) -> list[str]:
     # Prefer real projects (git repos) and exact names.
     return sorted(found, key=lambda d: (not (Path(d) / ".git").exists(), Path(d).name.lower() not in words))[:3]
 
-
-def folder_in(text: str) -> str | None:
-    """The first directory named in a chat message, if any."""
-    found = folders_in(text)
-    return found[0] if found else None
 
 PLAN = (
     "You are Skipper, the user's conversational chief of staff for an autonomous software family. "
@@ -265,15 +276,6 @@ class StateStore:
             {"id": r["id"], "ts": r["ts"], "role": r["role"], "text": r["text"], "task": r["task_id"]}
             for r in reversed(rows)
         ]
-
-    def request_folder(s, path):
-        with s.connect() as db:
-            db.execute(
-                "INSERT INTO folder_requests (path, requested_at, approved_at) VALUES (?, ?, NULL) "
-                "ON CONFLICT(path) DO UPDATE SET requested_at=excluded.requested_at",
-                (path, time.time()),
-            )
-            return db.execute("SELECT id, path FROM folder_requests WHERE path=?", (path,)).fetchone()
 
     def pending_folders(s):
         with s.connect() as db:
@@ -600,7 +602,6 @@ class Skipper:
                 for name, agent in app.cast.items()
             ],
             "budget": {"cap": app.cast["spark"].ledger.cap, "spent": round(app.cast["spark"].ledger.spent, 4)},
-            "state_file": str(s.store.path),
         }
 
     def status(s, app):
@@ -734,6 +735,21 @@ class Skipper:
                 return f"I don’t have a finished report from {name} yet.", ""
         return None
 
+    def respond(s, user, text, task=None, role="skipper", **extra):
+        assistant = s.store.message(role, text, task)
+        return {"reply": text, "task": task, **extra, "messages": [user, assistant]}
+
+    async def talk(s, app, key, ask, text, user):
+        """A conversation with one member: read-only, unless the user asks for changes in a named folder."""
+        agent = app.cast[key]
+        context, trees = s.member_context(app, key)
+        folders = [*s.folders_for(text), *trees]
+        write = bool(folders) and bool(WRITE_ASK.search(ask))
+        rule = "You may read, create, edit and delete files in the named folders to do what the user asked; report exactly what you changed." if write else "You may run read-only inspection commands. Do not edit files or start implementation work."
+        prompt = f"Answer the user conversationally as {agent.persona.name}. {rule}\n{context}\nUser: {ask}"
+        reply = await read_only(agent, prompt, lobby(), folders, write)
+        return s.respond(user, f"{agent.persona.name}: {reply}", role="member")
+
     async def chat(s, text, repo, app, enqueue):
         text = text.strip()
         if not text:
@@ -765,8 +781,7 @@ class Skipper:
             member = assigned if assigned in app.lead.members else app.lead.select(task.text)
             enqueue(app.lead.resume(task, member), wanted)
             reply = f"I’ve resumed task {wanted} with {app.cast[member].persona.name} in its preserved worktree."
-            assistant = s.store.message("skipper", reply, wanted)
-            return {"reply": reply, "task": wanted, "member": member, "messages": [user, assistant]}
+            return s.respond(user, reply, wanted, member=member)
         decision = re.fullmatch(r"(accept|reject)(?: task)?\s+([a-z0-9+-]+)", lower)
         if decision:
             choice, wanted = decision.groups()
@@ -779,8 +794,7 @@ class Skipper:
             task = Task(**pending[wanted])
             enqueue(app.lead.resolve(task, choice == "accept"), wanted)
             reply = f"I’ve recorded your decision to {choice} task {wanted}. I’ll report the result."
-            assistant = s.store.message("skipper", reply, wanted)
-            return {"reply": reply, "task": wanted, "member": None, "messages": [user, assistant]}
+            return s.respond(user, reply, wanted, member=None)
         apply = re.fullmatch(r"apply(?: task)?\s+([a-z0-9+-]+)", lower)
         if apply:
             wanted = apply.group(1)
@@ -790,25 +804,16 @@ class Skipper:
             task = Task(**pending[wanted])
             enqueue(app.lead.apply(task), wanted)
             reply = f"I’m checking whether the accepted changes for task {wanted} can now be applied safely."
-            assistant = s.store.message("skipper", reply, wanted)
-            return {"reply": reply, "task": wanted, "member": None, "messages": [user, assistant]}
+            return s.respond(user, reply, wanted, member=None)
         if re.fullmatch(r"\s*(?:list |show |what are )?(?:my |your )?(?:habits|preferences)\??\s*", lower):
-            reply = app.profile.report()
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, app.profile.report())
         if forget := re.fullmatch(r"\s*forget(?: habit)?\s+(\d+)\s*", lower):
-            reply = f"Dropped: {app.profile.forget(int(forget.group(1)))}"
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, f"Dropped: {app.profile.forget(int(forget.group(1)))}")
         if re.fullmatch(r"\s*learn (?:from )?(?:my |how i )(?:work|commits|habits|code|requests)\s*[.!]?", lower):
             enqueue(app.profile.study())
-            reply = "I’m studying your recent commits and requests now. I’ll tell you what I notice."
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, "I’m studying your recent commits and requests now. I’ll tell you what I notice.")
         if re.fullmatch(r"\s*(?:list |show |what )?(?:our |the )?skills\??\s*", lower):
-            reply = skills.report(app.lead.root)
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, skills.report(app.lead.root))
         if (moved := MOVE.match(text)) and len(text) < 300:
             named = folders_in(moved.group(1)) or local_projects(moved.group(1), s.store.approved_folders())
             if named:
@@ -817,11 +822,9 @@ class Skipper:
                 items = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir() if not p.name.startswith("."))
                 kind = "a git repository" if (path / ".git").exists() else "a plain folder"
                 reply = f"Now working in {path} ({kind}), {len(items)} items: {', '.join(items[:12])}{'…' if len(items) > 12 else ''}. Tasks I start here can read and write in it."
-                assistant = s.store.message("skipper", reply)
-                return {"reply": reply, "task": None, "repo": str(path), "messages": [user, assistant]}
+                return s.respond(user, reply, repo=str(path))
         if answered := s.direct_answer(text, app):
-            assistant = s.store.message("skipper", answered[0], answered[1] or None)
-            return {"reply": answered[0], "task": answered[1] or None, "messages": [user, assistant]}
+            return s.respond(user, answered[0], answered[1] or None)
         if is_research_followup(text):
             jobs = s.health(app)["research"]
             active = [job for job in jobs if job["status"] == "running"]
@@ -840,47 +843,32 @@ class Skipper:
                     reply = f"Quill’s latest research job {job['id']} failed: {job['summary']}"
                 else:
                     reply = "I don’t have a research job recorded yet, so I can’t claim Quill has started. Tell me what you want researched and I’ll assign it."
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, reply)
         if len(text) < 80 and re.search(r"\b(status|health|who is working|what is happening|what's happening)\b", lower):
-            reply = s.status(app)
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, s.status(app))
         if re.search(r"\b(capabilities|what can (?:the )?(?:family|fam|members)|what does .+ do)\b", lower):
-            reply = "Here’s what each family member is for:\n" + "\n".join(
+            return s.respond(user, "Here’s what each family member is for:\n" + "\n".join(
                 f"- {agent.persona.name}: {agent.persona.mission.split('. ')[0]} [{engine(agent)}]"
                 for agent in app.cast.values()
-            )
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            ))
         if re.fullmatch(r"\s*(help|what can you do)\s*[?.!]*", lower):
-            reply = "Tell me the outcome you want and I’ll assign the right family member, track the work and checks, then report back. Ask “status” for a health summary, or address a member by name if you want to speak with them."
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, "Tell me the outcome you want and I’ll assign the right family member, track the work and checks, then report back. Ask “status” for a health summary, or address a member by name if you want to speak with them.")
         if re.fullmatch(r"\s*(hi|hello|hey)\s*[?.!]*", lower):
-            reply = "Hello. Tell me what outcome you want, and I’ll take it from there."
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, "Hello. Tell me what outcome you want, and I’ll take it from there.")
         if lower.startswith("approve "):
             name = text[8:].strip()
             if name not in app.linker.props:
                 raise ValueError(f"I can’t find a waiting proposal named {name}.")
             await app.bus.emit(Approve(name))
-            reply = f"I approved {name}. I’ll keep it available for tasks that need it."
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "messages": [user, assistant]}
+            return s.respond(user, f"I approved {name}. I’ll keep it available for tasks that need it.")
         if asked := NEW_RESEARCH_ASK.search(text):
             question = re.sub(r"^\s*(this|that|it)?\s*[:,-]?\s*", "", text[asked.end():]) or text
             folders = s.folders_for(text, question)
             if not folders and LOCAL_HINT.search(text):
-                reply = s.no_folder_reply(text)
-                assistant = s.store.message("skipper", reply)
-                return {"reply": reply, "task": None, "messages": [user, assistant]}
+                return s.respond(user, s.no_folder_reply(text))
             research = ResearchRequest(question, folders)
             enqueue(research, research.id)
-            reply = f"I’ve assigned this research to Quill (job {research.id}). I’ll show its progress here and report the findings."
-            assistant = s.store.message("skipper", reply)
-            return {"reply": reply, "task": None, "research": research.id, "messages": [user, assistant]}
+            return s.respond(user, f"I’ve assigned this research to Quill (job {research.id}). I’ll show its progress here and report the findings.", research=research.id)
         for key, agent in app.cast.items():
             prefix = re.match(rf"^(?:ask|tell|talk to)\s+{re.escape(agent.persona.name)}\s*[:,]?\s*", text, re.IGNORECASE)
             if prefix:
@@ -889,14 +877,8 @@ class Skipper:
                     task_id = (re.search(r"\b([0-9a-f]{8}\+*)(?![\w+])", ask) or [None, ""])[1]
                     keys, cwd, found = s.consult_plan(app, agent.persona.name, repo, task_id)
                     enqueue(s.consult(app, keys, ask, cwd, found), found)
-                    reply = f"I’ve asked {agent.persona.name} to check this in the background and I’ll report the findings here when they’re done."
-                    assistant = s.store.message("skipper", reply, found or None)
-                    return {"reply": reply, "task": found or None, "messages": [user, assistant]}
-                context, trees = s.member_context(app, key)
-                prompt = f"Answer the user conversationally as {agent.persona.name}. You may run read-only inspection commands. Do not edit files or start implementation work.\n{context}\nUser: {ask}"
-                reply = await read_only(agent, prompt, lobby(), [*s.folders_for(text), *trees])
-                assistant = s.store.message("member", f"{agent.persona.name}: {reply}")
-                return {"reply": assistant["text"], "task": None, "messages": [user, assistant]}
+                    return s.respond(user, f"I’ve asked {agent.persona.name} to check this in the background and I’ll report the findings here when they’re done.", found or None)
+                return await s.talk(app, key, ask, text, user)
         members = [
             {
                 "key": key,
@@ -939,26 +921,18 @@ class Skipper:
                 member = app.lead.select(task_text)
             task = Task(task_text, cwd=repo, repo=repo, pin=member)
             enqueue(task)
-            reply = f"I’ve assigned this to {app.cast[member].persona.name}. I’ll track the work and checks, and tell you if I need your input."
-            assistant = s.store.message("skipper", reply, task.id)
-            return {"reply": reply, "task": task.id, "member": member, "messages": [user, assistant]}
+            return s.respond(user, f"I’ve assigned this to {app.cast[member].persona.name}. I’ll track the work and checks, and tell you if I need your input.", task.id, member=member)
         elif intent == "member_chat":
             member = str(plan.get("member", "")).strip().lower()
             if member not in app.cast:
                 raise ValueError("Skipper could not identify which family member you want to speak with.")
-            context, trees = s.member_context(app, member)
-            prompt = f"Answer the user conversationally as {app.cast[member].persona.name}. You may run read-only inspection commands. Do not edit files.\n{context}\nUser: {text}"
-            reply = await read_only(app.cast[member], prompt, lobby(), [*s.folders_for(text), *trees])
-            assistant = s.store.message("member", f"{app.cast[member].persona.name}: {reply}")
-            return {"reply": assistant["text"], "task": None, "messages": [user, assistant]}
+            return await s.talk(app, member, text, text, user)
         elif intent == "consult":
             task_id = str(plan.get("name", "")).strip()
             keys, cwd, found = s.consult_plan(app, str(plan.get("member", "")), repo, task_id)
             enqueue(s.consult(app, keys, str(plan.get("task") or text), cwd, found), found)
             names = ", ".join(app.cast[k].persona.name for k in keys)
-            reply = reply or f"I’ve asked {names} to check this in the background and I’ll report their findings here when they’re done."
-            assistant = s.store.message("skipper", reply, found or None)
-            return {"reply": reply, "task": found or None, "messages": [user, assistant]}
+            return s.respond(user, reply or f"I’ve asked {names} to check this in the background and I’ll report their findings here when they’re done.", found or None)
         elif intent == "note":
             running = [i for ids in app.lead.active.values() for i in ids]
             wanted = str(plan.get("name", "")).strip()
@@ -967,9 +941,7 @@ class Skipper:
                 raise ValueError("Which task is that for? Send its id, for example “tell task 1234abcd: use the existing form component”.")
             app.lead.tell(wanted, "the user", str(plan.get("task") or text))
             who = next((app.cast[m].persona.name for m, ids in app.lead.active.items() if wanted in ids), "the builder")
-            reply = reply or f"Passed that to {who} on task {wanted}. They get it before their next step, even mid-build."
-            assistant = s.store.message("skipper", reply, wanted)
-            return {"reply": reply, "task": wanted, "messages": [user, assistant]}
+            return s.respond(user, reply or f"Passed that to {who} on task {wanted}. They get it before their next step, even mid-build.", wanted)
         elif intent == "answer_question":
             pending = {
                 question["task"]["id"]: question
@@ -993,26 +965,18 @@ class Skipper:
                 await app.lead.answer(task, question["member"], answer)
 
             enqueue(continue_task(), wanted)
-            reply = f"Thanks. I’ve passed your answer to {app.cast[question['member']].persona.name} so they can continue task {wanted}."
-            assistant = s.store.message("skipper", reply, wanted)
-            return {"reply": reply, "task": wanted, "member": question["member"], "messages": [user, assistant]}
+            return s.respond(user, f"Thanks. I’ve passed your answer to {app.cast[question['member']].persona.name} so they can continue task {wanted}.", wanted, member=question["member"])
         elif intent == "research":
             folders = s.folders_for(text, str(plan.get("task") or ""))
             if not folders and LOCAL_HINT.search(text):
-                reply = s.no_folder_reply(text)
-                assistant = s.store.message("skipper", reply)
-                return {"reply": reply, "task": None, "messages": [user, assistant]}
+                return s.respond(user, s.no_folder_reply(text))
             research = ResearchRequest(str(plan.get("task") or text), folders)
             enqueue(research, research.id)
             reply = reply or f"I’ve assigned this research to Quill (job {research.id}). I’ll show its progress here and report the findings."
         elif intent == "focus":
-            from core import Focus
-
             enqueue(Focus(str(plan.get("task") or text)))
             reply = reply or "I’ve updated the family’s focus and started research."
         elif intent == "teach":
-            from core import Correction
-
             enqueue(Correction(str(plan.get("task") or text)))
             reply = reply or "I’ve saved that guidance for future work."
         elif intent == "approve_tool":
@@ -1025,5 +989,4 @@ class Skipper:
             raise ValueError("Skipper could not determine a safe next step. Please rephrase the request.")
         elif not reply:
             raise ValueError("Skipper could not answer that just now.")
-        assistant = s.store.message("skipper", reply)
-        return {"reply": reply, "task": None, "messages": [user, assistant]}
+        return s.respond(user, reply)

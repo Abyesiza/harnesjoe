@@ -1,10 +1,11 @@
 "use client";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useEffect, useState } from "react";
-import { api, type Attachment, type ChatMessage, type Folders, type Health, type Run, type Source } from "./api";
+import { api, type Artifact, type Attachment, type ChatMessage, type Folders, type Health, type Run, type Source, type State, type Todo } from "./api";
 import { ACTIVITY_TEXT, REFRESH, words } from "./events";
 
 export type Item = { id: number; title: string; text?: string; meta?: string; cls?: string; sources?: Source[] };
+export type Review = { id: string; kind: "decide" | "apply" | "question"; text: string };
 export type Line = ChatMessage & { id: number };
 
 const ago = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleTimeString() : "");
@@ -22,6 +23,10 @@ export function useConsole() {
   const [research, setResearch] = useState<Item[]>([]);
   const [activity, setActivity] = useState<Item[]>([]);
   const [folders, setFolders] = useState<Folders>({ pending: [], approved: [] });
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [state, setState] = useState<State | null>(null);
+  const [review, setReview] = useState<Review[]>([]);
   const [repo, setRepo] = useState("");
   const [busy, setBusy] = useState(false);
   const fail = useCallback((e: unknown) => setError(e instanceof Error ? e.message : String(e)), []);
@@ -47,6 +52,11 @@ export function useConsole() {
     [fail],
   );
 
+  const refreshSide = useCallback(() => {
+    api.todos().then(setTodos).catch(() => {});
+    api.artifacts().then(setArtifacts).catch(() => {});
+    api.state().then(setState).catch(() => {});
+  }, []);
   const refreshFolders = useCallback(() => api.folders().then(setFolders).catch(fail), [fail]);
 
   useEffect(() => {
@@ -54,9 +64,10 @@ export function useConsole() {
     api.runs().then((r) => setRuns(r)).catch(fail);
     refreshFolders();
     refreshHealth();
+    refreshSide();
     const timer = setInterval(refreshHealth, 5000);
     return () => clearInterval(timer);
-  }, [fail, refreshHealth, refreshFolders]);
+  }, [fail, refreshHealth, refreshFolders, refreshSide]);
 
   useEffect(() => {
     const stream = new EventSource("/api/stream");
@@ -88,14 +99,26 @@ export function useConsole() {
           setLines((l) => [...l, line({ role: "event", text: `ℹ️ ${d.text} (read-only)`, ts: event.ts })]);
         }
         if (text) setLines((l) => [...l, line({ role: "event", text, ts: event.ts })]);
-        if (REFRESH.includes(type)) await refreshHealth();
+        const open = (r: Review) => setReview((l) => [...l.filter((x) => x.id !== r.id || x.kind !== r.kind), r]);
+        const close = (id: string, ...kinds: Review["kind"][]) => setReview((l) => l.filter((x) => x.id !== id || !kinds.includes(x.kind)));
+        if (type === "Decision" && d.escalate) open({ id: d.task.id, kind: "decide", text: d.task.text });
+        if (type === "Decision" && !d.escalate) close(d.task.id, "decide");
+        if (type === "HumanDecision") close(d.task.id, "decide");
+        if (type === "ApplyPending") open({ id: d.task.id, kind: "apply", text: d.reason });
+        if (type === "Applied") close(d.task.id, "apply");
+        if (type === "Question") open({ id: d.task.id, kind: "question", text: `${d.member}: ${d.text}` });
+        if (type === "HumanAnswer") close(d.task.id, "question");
+        if (REFRESH.includes(type)) {
+          refreshSide();
+          await refreshHealth();
+        }
         if (type === "FolderApproved" || type === "FolderApprovalNeeded") await refreshFolders();
       } catch (err) {
         fail(err);
       }
     };
     return () => stream.close();
-  }, [addActivity, addResearch, addRun, fail, refreshFolders, refreshHealth]);
+  }, [addActivity, addResearch, addRun, fail, refreshFolders, refreshHealth, refreshSide]);
 
   const send = useCallback(
     async (text: string, files: Attachment[]) => {
@@ -113,7 +136,7 @@ export function useConsole() {
     [repo, refreshHealth, say],
   );
 
-  return { connection, error, setError, fail, health, lines, say, runs, research, activity, folders, refreshFolders, repo, setRepo, send, busy };
+  return { connection, error, setError, fail, health, lines, say, runs, research, activity, todos, artifacts, state, review, refreshSide, folders, refreshFolders, repo, setRepo, send, busy };
 }
 
 export type Console = ReturnType<typeof useConsole>;

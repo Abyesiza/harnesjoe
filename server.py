@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def load_env(path):
-    for ln in path.read_text().splitlines() if path.exists() else []:
+    for ln in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
         k, _, v = ln.partition("=")
         if k.strip() and not k.lstrip().startswith("#"):
             os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
@@ -17,6 +17,7 @@ import hmac
 import json
 import logging
 import secrets
+import urllib.parse
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
@@ -24,32 +25,21 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import core
-from agents import Agent
-from app import MODEL, P, build
-from core import (
-    CURRENT_TASK,
-    Approve,
-    Correction,
-    Focus,
-    ResearchRequest,
-    Task,
-    Tick,
-    Ticker,
-)
 import reports
 import uploads
-import urllib.parse
-from link import ready
+from agents import Agent
+from app import build
+from core import CURRENT_TASK, ResearchRequest, Task, Tick, Ticker
 from skipper import Skipper, StateStore, folders_in, safe_folder
 
 log = logging.getLogger("fam.server")
 
 WEB = Path(__file__).with_name("web")
-S = SimpleNamespace(app=None, feed=None, store=None, skipper=None, ticker=None, every=None, jobs=set(), token="")
+S = SimpleNamespace(app=None, feed=None, store=None, skipper=None, ticker=None, jobs=set(), token="")
 TOKEN_HEADER = "x-fam-token"
 
 
@@ -137,20 +127,9 @@ class RunTracker:
         S.store.run_fallback(run_id, failed, to, reason)
         S.feed.push("Fallback", {"run": run_id, "task": CURRENT_TASK.get(), "failed": failed, "to": to, "reason": reason})
 
-    def __init__(self) -> None:
-        self.noticed: set[tuple[str, str]] = set()
-
     def command(self, run_id: str, entry: dict) -> None:
         S.store.run_command(run_id, entry)
         S.feed.push("Command", {"run": run_id, "task": CURRENT_TASK.get(), **entry})
-        task = CURRENT_TASK.get()
-        for path in entry.get("outside") or []:
-            if (task or run_id, path) in self.noticed:
-                continue
-            self.noticed.add((task or run_id, path))
-            note = f"{entry.get('agent') or entry.get('cli') or 'An agent'} read {path}"
-            S.feed.push("Permission", {"run": run_id, "task": task, "agent": entry.get("agent"), "path": path, "text": note})
-            S.store.message("skipper", f"ℹ️ {note} (read-only, outside the approved folders).", task or None)
 
     def finish(self, run_id: str, status: str, output: str, cli: str = "") -> None:
         row = S.store.run_finish(run_id, status, output, cli)
@@ -220,11 +199,7 @@ async def life(_):
     S.token = write_token(home)
     S.store.interrupt_runs()
     S.app = build(home, apply_accepted=True)
-    initial = Path(os.environ.get("FAM_REPO") or Path(__file__).resolve().parent).expanduser().resolve()
-    S.store.request_folder(str(initial))
-    request = next((r for r in S.store.pending_folders() if r["path"] == str(initial)), None)
-    if request:
-        S.store.approve_folder(request["id"], str(initial))
+    S.store.grant_folder(str(Path(os.environ.get("FAM_REPO") or Path(__file__).resolve().parent).expanduser().resolve()))
     S.skipper = Skipper(S.store, S.app.skipper)
     S.app.profile.folders, S.app.profile.messages = S.store.approved_folders, S.store.messages
     for event in S.store.events(limit=100000):
@@ -281,8 +256,7 @@ async def life(_):
         notice = f"Task(s) {ids} are waiting for your decision."
         if not any(notice in message["text"] for message in S.store.messages(limit=100)):
             S.store.message("skipper", f"{notice} Send “accept task <id>” or “reject task <id>”.")
-    S.every = 1800
-    S.ticker = asyncio.create_task(Ticker(S.app.bus).run(S.every))
+    S.ticker = asyncio.create_task(Ticker(S.app.bus).run(1800))
     yield
     if S.ticker:
         S.ticker.cancel()
@@ -308,26 +282,6 @@ async def require_token(request: Request, call_next):
     return await call_next(request)
 
 
-class TaskIn(BaseModel):
-    text: str = Field(min_length=1, max_length=8000)
-    repo: str = ""
-    pin: str = ""
-
-
-class TossIn(BaseModel):
-    to: str
-    ask: str = Field(min_length=1, max_length=8000)
-    repo: str = ""
-
-
-class TextIn(BaseModel):
-    text: str = Field(min_length=1, max_length=8000)
-
-
-class WatchIn(BaseModel):
-    every: float = Field(ge=1, le=86400)
-
-
 class ChatIn(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     repo: str = ""
@@ -345,26 +299,8 @@ class FolderApprovalIn(BaseModel):
 @api.get("/")
 def index():
     # Same-origin bootstrap: other sites cannot read this response, and TrustedHost blocks DNS rebinding.
-    page = (WEB / "index.html").read_text().replace("__FAM_TOKEN__", S.token)
+    page = (WEB / "index.html").read_text(encoding="utf-8").replace("__FAM_TOKEN__", S.token)
     return HTMLResponse(page, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"})
-
-
-@api.get("/api/state")
-def state():
-    a, rules = S.app, next(iter(S.app.cast.values())).rules
-    return {
-        "repo": os.environ.get("FAM_REPO") or os.getcwd(),
-        "budget": {"cap": Agent.ledger.cap, "spent": round(Agent.ledger.spent, 4)},
-        "watch": S.every,
-        "running": len(S.jobs),
-        "crew": [{"key": k, "name": p.name, "model": MODEL.get(k, "copilot"), "mission": p.mission.split(". ")[0], "voice": p.voice, "builder": k in a.lead.members, "active": len(a.lead.active[k]), "available": not a.lead.active[k], "completed": a.lead.completed[k], "confidence": round(a.lead.reward[k] / a.lead.completed[k], 2) if a.lead.completed[k] else 0.5} for k, p in P.items()],
-        "health": S.skipper.health(a),
-        "proposals": a.linker.props,
-        "trusted": {n: {**v, "ready": ready(v["cfg"]), "score": v["a"] / (v["a"] + v["b"])} for n, v in a.linker.trusted.items()},
-        "queue": a.linker.queue,
-        "dead": a.linker.dead,
-        "rules": {"active": rules.active, "counts": dict(rules.n), "candidates": dict(rules.cand)},
-    }
 
 
 @api.get("/api/health")
@@ -407,18 +343,6 @@ async def upload(request: Request):
         raise HTTPException(400, str(e))
     S.feed.push("Activity", {"source": "upload", "text": f"Received {meta['name']} ({meta['size']} bytes)", "level": ""})
     return {k: meta[k] for k in ("id", "name", "size", "type")}
-
-
-@api.get("/api/uploads/{uid}")
-async def get_upload(uid: str, request: Request):
-    """Previews need the token too: attachments are private."""
-    given = request.headers.get(TOKEN_HEADER, "")
-    if not S.token or not hmac.compare_digest(given, S.token):
-        raise HTTPException(401, "Missing or invalid Fam token.")
-    meta = uploads.find(fam_home(), uid)
-    if not meta:
-        raise HTTPException(404, "No such attachment.")
-    return FileResponse(meta["path"], media_type=meta["type"], headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": f"inline; filename={meta['name']}"})
 
 
 @api.post("/api/chat")
@@ -547,89 +471,6 @@ async def stream(request: Request):
             S.feed.waiters.discard(q)
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-@api.post("/api/tasks", status_code=202)
-async def add_task(b: TaskIn):
-    if b.pin and b.pin not in S.app.lead.members:
-        raise HTTPException(400, f"unknown member {b.pin}")
-    t = Task(b.text, repo_of(b.repo), pin=b.pin)
-    spawn(S.app.bus.emit(t), t.id)
-    return {"id": t.id}
-
-
-@api.post("/api/toss")
-async def toss(b: TossIn):
-    if b.to not in S.app.cast:
-        raise HTTPException(400, f"unknown member {b.to}")
-    t = Task(b.ask, repo_of(b.repo))
-    try:
-        text = await S.app.lead.toss(t, b.to, b.ask)
-    except Exception as e:
-        raise HTTPException(502, f"{type(e).__name__}: {e}"[:500])
-    S.feed.push("TossReply", {"task": t.id, "to": b.to, "ask": b.ask, "text": text})
-    return {"id": t.id, "text": text}
-
-
-@api.post("/api/brief")
-async def brief(b: TextIn):
-    try:
-        return await S.app.expert.brief(Task(b.text))
-    except Exception as e:
-        raise HTTPException(502, f"{type(e).__name__}: {e}"[:500])
-
-
-@api.post("/api/research", status_code=202)
-async def research(b: TextIn):
-    try:
-        folders = [str(grant(f)) for f in folders_in(b.text)]
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from e
-    request = ResearchRequest(b.text, folders)
-    spawn(S.app.bus.emit(request), request.id)
-    return {}
-
-
-@api.post("/api/focus", status_code=202)
-async def focus(b: TextIn):
-    spawn(S.app.bus.emit(Focus(b.text)))
-    return {}
-
-
-@api.post("/api/fix")
-async def fix(b: TextIn):
-    await S.app.bus.emit(Correction(b.text))
-    return {}
-
-
-@api.post("/api/approve")
-async def approve(b: TextIn):
-    if b.text not in S.app.linker.props:
-        raise HTTPException(404, f"no proposal named {b.text}")
-    await S.app.bus.emit(Approve(b.text))
-    return {}
-
-
-@api.post("/api/tick", status_code=202)
-async def tick():
-    spawn(S.app.bus.emit(Tick()))
-    return {}
-
-
-@api.post("/api/watch")
-async def watch(b: WatchIn):
-    if S.ticker:
-        S.ticker.cancel()
-    S.ticker, S.every = asyncio.create_task(Ticker(S.app.bus).run(b.every)), b.every
-    return {"every": b.every}
-
-
-@api.delete("/api/watch")
-async def unwatch():
-    if S.ticker:
-        S.ticker.cancel()
-    S.ticker = S.every = None
-    return {}
 
 
 if __name__ == "__main__":

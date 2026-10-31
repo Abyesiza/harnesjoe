@@ -7,9 +7,9 @@
 <title>Skipper</title>
 <script>try{if(localStorage.getItem("fam-theme")==="dark")document.documentElement.dataset.theme="dark"}catch(e){}</script>
 <style>
-:root{color-scheme:light;--background:0 0% 100%;--card:0 0% 100%;--muted:210 20% 97%;--border:214 15% 82%;--foreground:0 0% 15%;--muted-foreground:215 12% 36%;--primary:215 77% 47%;--primary-foreground:0 0% 100%;--success:145 63% 27%;--warning:32 95% 30%;--destructive:0 72% 42%;--ring:215 77% 47%;--user:215 77% 47% / .09;--radius:.375rem;
+:root{color-scheme:light;--background:0 0% 100%;--card:0 0% 100%;--muted:210 20% 97%;--border:214 15% 82%;--foreground:0 0% 15%;--muted-foreground:215 12% 36%;--primary:215 77% 47%;--primary-foreground:0 0% 100%;--success:145 63% 27%;--warning:32 95% 30%;--destructive:0 72% 42%;--ring:215 77% 47%;--user:215 77% 47% / .09;--radius:.9rem;--shadow:0 1px 2px #0000000d,0 8px 24px #0000000f;--ctl:hsl(215 15% 42%);
 --bg:hsl(var(--background));--panel:hsl(var(--card));--line:hsl(var(--border));--fg:hsl(var(--foreground));--dim:hsl(var(--muted-foreground));--accent:hsl(var(--primary));--green:hsl(var(--success));--yellow:hsl(var(--warning));--red:hsl(var(--destructive))}
-:root[data-theme=dark]{color-scheme:dark;--background:222 18% 7%;--card:222 16% 11%;--muted:222 16% 6%;--border:222 14% 22%;--foreground:225 25% 93%;--muted-foreground:224 13% 70%;--primary:217 100% 76%;--primary-foreground:220 40% 10%;--success:145 61% 58%;--warning:43 87% 66%;--destructive:0 100% 74%;--ring:217 100% 76%;--user:215 40% 18%}
+:root[data-theme=dark]{color-scheme:dark;--background:222 18% 7%;--card:222 16% 11%;--muted:222 16% 6%;--border:222 14% 22%;--foreground:225 25% 93%;--muted-foreground:224 13% 70%;--primary:217 100% 76%;--primary-foreground:220 40% 10%;--success:145 61% 58%;--warning:43 87% 66%;--destructive:0 100% 74%;--ring:217 100% 76%;--user:215 40% 18%;--ctl:hsl(222 14% 58%)}
 :focus-visible{outline:3px solid hsl(var(--ring));outline-offset:2px;border-radius:var(--radius)}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 .feed{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:6px}
@@ -17,13 +17,13 @@
 .feed li b{color:var(--fg)}.feed li .meta{color:var(--dim);display:block;margin-top:2px}
 .feed a{color:var(--accent)}.feed .error{border-color:hsl(var(--destructive)/.6)}.feed .warn{border-color:hsl(var(--warning)/.6)}
 .status-running{color:var(--yellow)}.status-done{color:var(--green)}.status-failed,.status-interrupted{color:var(--red)}
-.tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}.tabs button{padding:5px 9px;font-size:13.5px}.tabs button[aria-selected=true]{border-color:var(--accent);color:var(--accent)}
+.tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}.tabs button{padding:5px 9px;font-size:13.5px}.tabs button[aria-selected=true]{border-color:var(--accent);color:var(--accent);font-weight:600}.inline{display:flex;flex-wrap:wrap;align-items:end;gap:8px;margin-bottom:12px}.inline label{display:grid;gap:3px;font-size:13.5px;color:var(--dim);flex:1 1 150px}h3.group{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:14px 0 6px}.feed li button{margin-top:6px;margin-right:6px;padding:5px 10px}pre.meta{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
 .tabpanel[hidden]{display:none}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,sans-serif;height:100vh;display:grid;grid-template-rows:auto 1fr}
 header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--line)}
 h1{font-size:17px;margin:0}.grow{flex:1}.dim{color:var(--dim);font-size:14px}
-button,input,textarea{font:inherit;color:inherit;background:hsl(var(--muted));border:1px solid var(--line);border-radius:var(--radius);padding:9px 11px}
+button,input,textarea,select{font:inherit;color:inherit;background:hsl(var(--muted));border:1px solid var(--ctl);border-radius:var(--radius);padding:9px 11px}
 button{cursor:pointer;background:var(--panel)}button:hover{border-color:var(--accent)}button:disabled{opacity:.5;cursor:default}
 #repo{width:min(300px,25vw);font-size:12px;padding:7px 9px}
 #connection{color:var(--dim);font-size:13.5px}
@@ -37,9 +37,8 @@ main{min-height:0;display:grid;grid-template-columns:minmax(190px,240px) minmax(
 .member.busy .availability{color:var(--yellow)}
 .member .details{margin-top:4px;font-size:11px;color:var(--dim)}
 .member.busy{border-color:var(--yellow)}.member .availability .spinner{display:inline-block;vertical-align:-3px;margin-right:6px;width:11px;height:11px}
-:root{--radius:.9rem;--shadow:0 1px 2px #0000000d,0 8px 24px #0000000f}
 header{box-shadow:var(--shadow)}.side,.center,.dialog{box-shadow:var(--shadow);border-radius:1.1rem}.member,.message,.chip{box-shadow:0 1px 3px #00000014}.member{border-radius:.8rem}.message{border-radius:1rem}
-button,input,textarea{border-radius:.7rem}button:hover{box-shadow:0 2px 8px #0000001a}.pill{box-shadow:0 1px 2px #0000000d}
+button,input,textarea,select{border-radius:.7rem}button:hover{box-shadow:0 2px 8px #0000001a}.pill{box-shadow:0 1px 2px #0000000d}
 .center{display:grid;grid-template-rows:auto 1fr auto;overflow:hidden}
 #health{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .pill{border:1px solid var(--line);border-radius:99px;padding:3px 10px;color:var(--dim);font-size:13px}
@@ -74,8 +73,8 @@ form button{height:44px;padding-inline:18px;background:var(--accent);color:hsl(v
 .folder-row span{flex:1}
 #browse-list{max-height:230px;overflow:auto}
 #error[role=alert]:not(:empty){padding:4px 0}
-@media(max-width:900px){main{grid-template-columns:180px minmax(340px,1fr);overflow:auto}#right{grid-column:1/-1;display:flex;gap:8px;overflow:auto}.member{min-width:170px;flex:1}}
-@media(max-width:600px){header{padding:9px;gap:7px}main{padding:8px;gap:8px;grid-template-columns:1fr;grid-template-rows:auto minmax(420px,1fr) auto}.side{max-height:150px}#left,#right{display:flex;gap:8px;overflow:auto}.side h2{min-width:100px;align-self:center}.member{min-width:160px;margin:0}#repo{width:35vw}.message{max-width:94%}}
+@media(max-width:900px){main{grid-template-columns:180px minmax(340px,1fr);overflow:auto}#right{grid-column:1/-1;max-height:60vh;overflow:auto}#left .member{min-width:170px}}
+@media(max-width:600px){header{padding:9px;gap:7px}main{padding:8px;gap:8px;grid-template-columns:1fr;grid-template-rows:auto minmax(420px,1fr) auto}.side{max-height:150px}#left{display:flex;gap:8px;overflow:auto}#right{max-height:60vh;overflow:auto}.side h2{min-width:100px;align-self:center}.member{min-width:160px;margin:0}#repo{width:35vw}.message{max-width:94%}}
 </style>
 </head>
 <body>
@@ -113,13 +112,35 @@ form button{height:44px;padding-inline:18px;background:var(--accent);color:hsl(v
   </section>
   <aside class="side" id="right" aria-label="Review, research and support">
     <div class="tabs" role="tablist" aria-label="Live activity">
-      <button type="button" role="tab" aria-selected="true" aria-controls="tab-runs" id="t-runs">CLI runs</button>
+      <button type="button" role="tab" aria-selected="true" aria-controls="tab-todo" id="t-todo">To do</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="tab-review" id="t-review">Review</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="tab-files" id="t-files">Files</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="tab-runs" id="t-runs">CLI runs</button>
       <button type="button" role="tab" aria-selected="false" aria-controls="tab-research" id="t-research">Research</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="tab-habits" id="t-habits">Habits</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="tab-tools" id="t-tools">Tools</button>
       <button type="button" role="tab" aria-selected="false" aria-controls="tab-activity" id="t-activity">Self-improve &amp; MCP</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="tab-actions" id="t-actions">Actions</button>
       <button type="button" role="tab" aria-selected="false" aria-controls="tab-crew" id="t-crew">Crew</button>
     </div>
-    <section class="tabpanel" id="tab-runs" role="tabpanel" aria-labelledby="t-runs"><h2>Copilot / Claude runs</h2><ul class="feed" id="runs" aria-live="polite"></ul></section>
+    <section class="tabpanel" id="tab-todo" role="tabpanel" aria-labelledby="t-todo"><h2>To do</h2><ul class="feed todo" id="todos" aria-live="polite"></ul></section>
+    <section class="tabpanel" id="tab-review" role="tabpanel" aria-labelledby="t-review" hidden><h2>Review: decisions, questions, apply</h2><ul class="feed" id="review" aria-live="polite"></ul><p class="dim">Only items that arrive while this page is open are listed. After a reload, type “accept &lt;id&gt;” or “reject &lt;id&gt;” in the chat.</p></section>
+    <section class="tabpanel" id="tab-files" role="tabpanel" aria-labelledby="t-files" hidden><h2>Files made for you</h2><ul class="feed" id="files" aria-live="polite"></ul></section>
+    <section class="tabpanel" id="tab-runs" role="tabpanel" aria-labelledby="t-runs" hidden><h2>Copilot / Claude runs</h2><ul class="feed" id="runs" aria-live="polite"></ul></section>
     <section class="tabpanel" id="tab-research" role="tabpanel" aria-labelledby="t-research" hidden><h2>Web research &amp; sources</h2><ul class="feed" id="research"></ul></section>
+    <section class="tabpanel" id="tab-habits" role="tabpanel" aria-labelledby="t-habits" hidden><h2>Habits and teaching</h2>
+      <div class="inline"><button type="button" data-say="habits">Show my habits</button><button type="button" data-say="learn from my work">Learn from my work</button></div>
+      <form class="inline" data-post="/api/fix"><label>Teach Skipper a correction or standing rule<input required maxlength="8000"></label><button>Teach</button></form>
+      <form class="inline" data-say-form="forget "><label>Forget habit number<input type="number" min="1" required></label><button>Forget</button></form>
+      <h3 class="group">Learned rules</h3><ul class="feed" id="rules"></ul></section>
+    <section class="tabpanel" id="tab-tools" role="tabpanel" aria-labelledby="t-tools" hidden><h2>Tool proposals</h2><h3 class="group">Proposed tools</h3><ul class="feed" id="proposals" aria-live="polite"></ul><h3 class="group">Trusted tools</h3><ul class="feed" id="trusted"></ul><p class="dim" id="queue"></p></section>
+    <section class="tabpanel" id="tab-actions" role="tabpanel" aria-labelledby="t-actions" hidden><h2>Start work and consult</h2>
+      <h3 class="group">New task</h3><form class="inline" id="task-form"><label>What should the family do?<input required maxlength="8000"></label><label>Pin to<select id="pin"><option value="">Skipper picks</option></select></label><button>Start task</button></form>
+      <h3 class="group">Consult a member</h3><form class="inline" id="toss-form"><label>What do you want to ask?<input required maxlength="8000"></label><label>Ask<select id="toss-to"></select></label><button>Ask</button></form><div id="toss-reply" class="dim" role="status"></div>
+      <h3 class="group">Research</h3><form class="inline" data-post="/api/research"><label>Question for Quill<input required maxlength="8000"></label><button>Start research</button></form>
+      <h3 class="group">Focus</h3><form class="inline" data-post="/api/focus"><label>Field to focus on<input required maxlength="8000"></label><button>Set focus</button></form>
+      <h3 class="group">Brief</h3><form class="inline" id="brief-form"><label>Topic for a brief<input required maxlength="8000"></label><button>Get brief</button></form><pre class="meta" id="brief"></pre>
+      <h3 class="group">Watch ticker</h3><div class="inline"><label>Every (seconds)<input id="every" type="number" min="1" max="86400" value="60"></label><button id="watch" type="button" aria-pressed="false">Watch ticker</button><button id="tick" type="button">Tick now</button></div><p class="dim" id="watch-state">Ticker is off.</p></section>
     <section class="tabpanel" id="tab-activity" role="tabpanel" aria-labelledby="t-activity" hidden><h2>Daemon, scout &amp; MCP</h2><ul class="feed" id="activity"></ul></section>
     <section class="tabpanel" id="tab-crew" role="tabpanel" aria-labelledby="t-crew" hidden><h2>Review &amp; support</h2><div id="support"></div><h2>Approved folders</h2><ul class="feed" id="approved-side"></ul></section>
   </aside>
@@ -189,6 +210,10 @@ function updateHealth(h) {
   };
   pill(active ? `${active} task${active === 1 ? "" : "s"} in progress` : "Ready for your next task");
   pill(`Est. spend today ${h.budget.spent > 0 && h.budget.spent < 0.01 ? "<$0.01" : "$" + h.budget.spent.toFixed(2)} / $${h.budget.cap.toFixed(2)}`);
+  const opts = list => list.map(m => { const o = el("option", m.name); o.value = m.key; return o; });
+  const pin = $("pin").value, to = $("toss-to").value;
+  $("pin").replaceChildren($("pin").firstElementChild, ...opts(h.members.filter(m => m.builder))); $("pin").value = pin;
+  $("toss-to").replaceChildren(...opts(h.members)); if (to) $("toss-to").value = to;
   const builders = h.members.filter(member => member.builder);
   const support = h.members.filter(member => !member.builder);
   $("builders").replaceChildren(...builders.map(card));
@@ -217,7 +242,87 @@ async function api(path, options = {}) {
   if (!response.ok) throw new Error(result.detail || response.statusText);
   return result;
 }
+async function download(item) {
+  try {
+    const response = await fetch(`/api/artifacts/${item.id}/file`, {headers: {"X-Fam-Token": TOKEN}});
+    if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await response.blob());
+    link.download = item.name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  } catch (e) { $("error").textContent = e.message; }
+}
+async function refreshFiles() {
+  try {
+    const {items} = await api("/api/artifacts");
+    const rows = items.slice().reverse().map(item => {
+      const button = el("button", "Download");
+      button.type = "button";
+      button.addEventListener("click", () => download(item));
+      const row = el("li", "");
+      row.append(el("b", item.name + " "), el("span", `${item.kind} · ${Math.max(1, Math.round(item.size / 1024))} KB · ${item.by} · ${ago(item.ts)}`, "meta"), button);
+      return row;
+    });
+    $("files").replaceChildren(...(rows.length ? rows : [el("li", "Nothing yet. Ask for a spreadsheet, document or report.", "meta")]));
+  } catch (e) { /* best-effort */ }
+}
+const BOX = {open: "☐", doing: "◐", waiting: "…", blocked: "!", done: "☑", stopped: "✕"};
+async function refreshTodos() {
+  try {
+    const {items} = await api("/api/todos");
+    const tops = items.filter(i => !i.parent), done = i => ["done", "stopped"].includes(i.status);
+    const shown = [...tops.filter(i => !done(i)), ...tops.filter(done).slice(-4)];
+    const rows = shown.map(top => {
+      const row = el("li", "", top.status === "blocked" || top.status === "stopped" ? "warn" : "");
+      const steps = items.filter(i => i.parent === top.id).map(s => el("div", `${BOX[s.status]} ${s.text}${s.note && s.status !== "done" ? " — " + s.note : ""}`, "meta"));
+      row.append(el("b", `${BOX[top.status]} ${top.text.slice(0, 90)} `), el("span", `${top.owner || "unassigned"} · ${top.task} · ${top.status}${top.note ? ": " + top.note.slice(0, 100) : ""}`, "meta"), ...steps);
+      return row;
+    });
+    $("todos").replaceChildren(...(rows.length ? rows : [el("li", "Nothing yet. Tasks and their steps appear here as they start.", "meta")]));
+  } catch (e) { /* the list is best-effort */ }
+}
+const J = (method, body) => ({method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+const say = text => api("/api/chat", J("POST", {text, repo: $("repo").value.trim(), attachments: []})).then(r => r.messages.filter(m => m.role !== "user").forEach(m => bubble(m.role === "member" ? "member" : "skipper", m.text, m.ts))).catch(e => { $("error").textContent = e.message; });
+const reviews = new Map();
+function drawReview() {
+  const label = {decide: "Needs your decision", apply: "Ready to apply", question: "Question for you"}, acts = {decide: [["accept", "Accept"], ["reject", "Reject"]], apply: [["apply", "Apply"]], question: []};
+  $("review").replaceChildren(...(reviews.size ? [...reviews.values()].map(r => {
+    const row = el("li", "", "warn");
+    row.append(el("b", `${label[r.kind]} · task ${r.id}`), el("span", r.text, "meta"));
+    acts[r.kind].forEach(([cmd, name]) => { const b = el("button", `${name} task ${r.id}`); b.type = "button"; b.onclick = () => say(`${cmd} ${r.id}`); row.append(b); });
+    if (r.kind === "question") row.append(el("span", "Answer in the chat.", "meta"));
+    return row;
+  }) : [el("li", "Nothing needs you right now.", "meta")]));
+}
+function trackReview(type, d) {
+  const set = kind => reviews.set(kind + d.task.id, {id: d.task.id, kind, text: kind === "apply" ? d.reason : kind === "question" ? `${d.member}: ${d.text}` : d.task.text});
+  const drop = kind => reviews.delete(kind + d.task.id);
+  if (type === "Decision") d.escalate ? set("decide") : drop("decide");
+  if (type === "HumanDecision") drop("decide");
+  if (type === "ApplyPending") set("apply");
+  if (type === "Applied") drop("apply");
+  if (type === "Question") set("question");
+  if (type === "HumanAnswer") drop("question");
+  drawReview();
+}
+async function refreshState() {
+  try {
+    const s = await api("/api/state"), none = text => [el("li", text, "meta")];
+    const names = Object.keys(s.proposals);
+    $("proposals").replaceChildren(...(names.length ? names.map(n => { const row = el("li", "", ""), b = el("button", "Approve " + n); b.type = "button"; b.onclick = () => api("/api/approve", J("POST", {text: n})).then(refreshState).catch(e => { $("error").textContent = e.message; }); row.append(el("b", n), b); return row; }) : none("No tools waiting for review.")));
+    const trusted = Object.entries(s.trusted);
+    $("trusted").replaceChildren(...(trusted.length ? trusted.map(([n, v]) => { const row = el("li", ""); row.append(el("b", n + " "), el("span", `${v.ready ? "ready" : "not ready"} · score ${v.score.toFixed(2)}`, "meta")); return row; }) : none("None yet.")));
+    $("queue").textContent = `Queued: ${s.queue.length} · Dead: ${s.dead.length}`;
+    $("rules").replaceChildren(...(s.rules.active.length ? s.rules.active.map(r => el("li", typeof r === "string" ? r : JSON.stringify(r))) : none("No standing rules yet.")));
+    $("watch").setAttribute("aria-pressed", String(!!s.watch));
+    $("watch-state").textContent = s.watch ? `Ticking every ${s.watch}s.` : "Ticker is off.";
+  } catch (e) { /* best-effort */ }
+}
 async function refreshHealth() {
+  refreshState();
+  refreshTodos();
+  refreshFiles();
   try { updateHealth(await api("/api/health")); }
   catch (e) { $("error").textContent = e.message; }
 }
@@ -241,12 +346,17 @@ const words = {
   Error: d => `Skipper hit an error${d.task ? " on task " + d.task : ""}: ${d.message}`,
   Said: d => `${d.name}: ${d.text}`,
   Consulted: d => `${d.member} reported back on task ${d.id}: ${d.findings}`,
-  Finding: d => `Quill finished research job ${d.id}: ${d.say || d.question}`,
+  Artifact: d => `${d.by} made ${d.name}. Download it from the Files tab.`,
+  Finding: d => `Quill finished research job ${d.id}: ${d.say || d.question}${d.report ? "\n\n" + d.report : ""}`,
   FolderApprovalNeeded: d => `Folder access requested for ${d.path}. Review it in “Folders & access”.`,
   FolderApproved: d => `Folder access approved for ${d.path}.`,
   Proposal: d => `A tool is available for review: ${d.names.join(", ")}. Say “approve <name>” if you want it.`,
   Scouted: d => `Ranger reviewed ${d.repo}. ${d.say || "The results are saved locally."}`,
   Focus: d => `The family is now focused on ${d.field}.`,
+  HumanDecision: d => `You ${d.accept ? "accepted" : "rejected"} task ${d.task.id}.`,
+  Stopped: d => `Task ${d.task.id} stopped: ${d.why}`,
+  TossReply: d => `${d.to} replied: ${d.text}`,
+  Lesson: d => `${d.by || "The family"} learned: ${d.text}`,
   Correction: () => "Skipper saved your guidance for future work.",
   Fallback: d => `${d.failed} failed (${d.reason}); retrying with ${d.to}.`
 };
@@ -288,7 +398,7 @@ function showSources(title, sources, ts) {
   sources.forEach(s => { const d = document.createElement("div"); d.append(link(s.url || s, s.title)); if (s.snippet) d.append(el("span", s.snippet, "meta")); parts.push(d); });
   li($("research"), parts, sources.length ? "" : "warn");
 }
-const tabs = ["runs", "research", "activity", "crew"];
+const tabs = ["todo", "review", "files", "runs", "research", "habits", "tools", "activity", "actions", "crew"];
 tabs.forEach(name => $("t-" + name).addEventListener("click", () => tabs.forEach(n => {
   $("t-" + n).setAttribute("aria-selected", String(n === name)); $("tab-" + n).hidden = n !== name;
 })));
@@ -309,10 +419,11 @@ stream.onmessage = async e => {
     if (event.type === "Finding" && (d.sources || []).length) showSources(`Finding ${d.id}: ${d.question || ""}`, d.sources, event.ts);
     if (event.type === "Activity") li($("activity"), [el("b", d.source + " "), el("span", d.text), el("span", ago(event.ts), "meta")], d.level);
     if (["Proposal", "Scouted", "Lesson", "Focus"].includes(event.type) && text) li($("activity"), [el("b", event.type + " "), el("span", text), el("span", ago(event.ts), "meta")]);
+    if (["Decision", "HumanDecision", "ApplyPending", "Applied", "Question", "HumanAnswer"].includes(event.type)) trackReview(event.type, d);
     if (event.type === "FolderApproved") await refreshFolders();
     if (event.type === "Permission") { li($("activity"), [el("b", "Permissions "), el("span", d.text), el("span", ago(event.ts), "meta")]); bubble("event", "ℹ️ " + d.text + " (read-only)", event.ts); }
     if (text) bubble("event", text, event.ts);
-    if (["Assigned", "ResearchRequest", "Finding", "Decision", "Applied", "ApplyPending", "Error", "Question", "HumanAnswer", "Run", "Consulted"].includes(event.type)) await refreshHealth();
+    if (["Assigned", "ResearchRequest", "Finding", "Decision", "Applied", "ApplyPending", "Error", "Question", "HumanAnswer", "Run", "Consulted", "Output", "Green", "Feedback", "Blocked", "Proposal", "Lesson", "HumanDecision", "Stopped", "Artifact"].includes(event.type)) await refreshHealth();
     if (event.type === "FolderApprovalNeeded") await refreshFolders();
   } catch (err) { $("error").textContent = err.message; }
 };
@@ -392,6 +503,36 @@ $("folder-request-form").addEventListener("submit", async e => {
     await refreshFolders();
   } catch (err) { $("error").textContent = err.message; }
 });
+document.querySelectorAll("[data-say]").forEach(b => b.addEventListener("click", () => say(b.dataset.say)));
+document.querySelectorAll("form[data-post],form[data-say-form]").forEach(f => f.addEventListener("submit", async e => {
+  e.preventDefault();
+  const input = f.querySelector("input");
+  try {
+    if (f.dataset.post) await api(f.dataset.post, J("POST", {text: input.value.trim()})); else await say(f.dataset.sayForm + input.value.trim());
+    input.value = "";
+  } catch (err) { $("error").textContent = err.message; }
+}));
+$("task-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  try { await api("/api/tasks", J("POST", {text: e.target.querySelector("input").value.trim(), repo: $("repo").value.trim(), pin: $("pin").value})); e.target.reset(); }
+  catch (err) { $("error").textContent = err.message; }
+});
+$("toss-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  try { $("toss-reply").textContent = (await api("/api/toss", J("POST", {to: $("toss-to").value, ask: e.target.querySelector("input").value.trim(), repo: $("repo").value.trim()}))).text; }
+  catch (err) { $("error").textContent = err.message; }
+});
+$("brief-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  try { $("brief").textContent = JSON.stringify(await api("/api/brief", J("POST", {text: e.target.querySelector("input").value.trim()})), null, 2); }
+  catch (err) { $("error").textContent = err.message; }
+});
+$("watch").addEventListener("click", async () => {
+  try { await (api("/api/watch", $("watch").getAttribute("aria-pressed") === "true" ? {method: "DELETE"} : J("POST", {every: Number($("every").value)}))); refreshState(); }
+  catch (err) { $("error").textContent = err.message; }
+});
+$("tick").addEventListener("click", () => api("/api/tick", J("POST", {})).catch(err => { $("error").textContent = err.message; }));
+drawReview();
 // --- theme ---
 function setTheme(dark) {
   if (dark) document.documentElement.dataset.theme = "dark"; else delete document.documentElement.dataset.theme;

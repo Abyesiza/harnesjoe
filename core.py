@@ -31,11 +31,11 @@ class Task:
     text: str
     cwd: str = "."
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
-    tries: int = 0
+    tries: int = 0  # unused; stored events still carry it and are rebuilt with Task(**data)
     repo: str = ""
     pin: str = ""
     flow: str = ""
-
+    verify: str = ""  # acceptance command that must pass before the task counts as done
 
 @dataclass
 class Briefed:
@@ -97,12 +97,6 @@ class Lesson:
 
 
 @dataclass
-class ToolAnswer:
-    text: str
-    ok: bool
-
-
-@dataclass
 class ResearchRequest:
     question: str
     folders: list = field(default_factory=list)
@@ -132,14 +126,6 @@ class Activity:
     source: str
     text: str
     level: str = "info"
-
-
-@dataclass
-class Fallback:
-    run: str
-    failed: str
-    to: str
-    reason: str
 
 
 @dataclass

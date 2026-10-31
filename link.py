@@ -53,10 +53,10 @@ def ready(cfg):
 
 
 class Linker(Node):
-    def __init__(s, bus, root, find=registry, auto=False, keep=2, retire=0.3, floor=0.3, stars=github_stars, relevance=0.3):
+    def __init__(s, bus, root, find=registry, keep=2, retire=0.3, floor=0.3, stars=github_stars, relevance=0.3):
         super().__init__(bus)
         s.stars, s.relevance = stars, relevance
-        s.root, s.find, s.auto, s.keep, s.retire, s.floor = Path(root), find, auto, keep, retire, floor
+        s.root, s.find, s.keep, s.retire, s.floor = Path(root), find, keep, retire, floor
         s.path, s.used, s.asked = s.root / "mcp.json", {}, set()
         d = json.loads(s.path.read_text()) if s.path.exists() else {"queue": list(SEEDS)}
         s.trusted, s.props, s.queue, s.dead = d.get("trusted", {}), d.get("props", {}), d.get("queue", []), d.get("dead", [])
@@ -77,16 +77,6 @@ class Linker(Node):
 
     def always(s):
         return [n for n, v in s.trusted.items() if v.get("always") and ready(v["cfg"])]
-
-    def add(s, name, cfg, desc="", always=False):
-        s.trusted[name] = {"cfg": cfg, "desc": desc, "a": 1.0, "b": 1.0, "always": always}
-        s.props.pop(name, None)
-        s.save()
-
-    def forget(s, name):
-        s.trusted.pop(name, None)
-        s.props.pop(name, None)
-        s.save()
 
     def match(s, need):
         x = enc(need)
@@ -144,8 +134,6 @@ class Linker(Node):
             hits = await s.search(need)
             if hits:
                 await s.propose(need, hits)
-                if s.auto:
-                    s.trust(hits[0]["name"])
                 names = s.match(need)
         if names:
             s.used[tid] = names

@@ -59,6 +59,15 @@ python daemon.py service-stop
 The service runs the checked-out source tree at its current path. Run `install-service` again after moving the project.
 The generated service carries the current CLI executable directories into its `PATH`, so Claude and Copilot remain available when systemd starts Skipper outside an interactive shell.
 
+## Backlog runs (one command)
+
+```sh
+python run.py /path/to/repo --budget 5 --parallel 3      # Linux / macOS
+python run.py C:\path\to\repo --budget 5 --parallel 3    # Windows
+```
+
+Reads `<repo>/backlog/backlog.json`, plans overlaps, hidden dependencies and contradictions in one call, runs tickets through the family in parallel worktrees, commits accepted work onto a `fam/run-<stamp>` branch in a recorded order, and claims a ticket done only if its acceptance test, the regression suite and the locked-file check all pass on the final tree. `--budget` is a hard cap: each running call reserves `FAM_CALL_RESERVE` (default $0.50) and is refused if the reservation would exceed it; Claude's reported cost is charged exactly. Logs with timestamps and spend go to `~/.fam/runs/<stamp>/` (`events`, `runs`, `spend`, `merges` as JSONL, plus `plan.json` and `report.json`). `python -m pytest -q test_run.py` checks all of this end to end with no model spend; CI runs it on Ubuntu and Windows.
+
 ## Next.js UI (optional)
 
 `frontend/` is a Next.js App Router version of the web page. The original `web/index.html` still works and is still served by `server.py`.
@@ -82,7 +91,7 @@ Research jobs are listed as active work under Quill until findings arrive. If Sk
 
 ### What agents may read, write and run
 
-Task agents run with no shell or file restrictions: Claude Code runs with permissions skipped and Copilot with all tools allowed, so builds, tests, installs and edits work anywhere the user's account can reach. Bash commands are only recorded (by the `runlog.py` hook) and listed in each run and its report. Two read-only cases remain: chat with a family member, and review of untrusted repositories, which can read but never edit or run code.
+Task agents run with no shell or file restrictions: Claude Code runs with permissions skipped and Copilot with all tools allowed, so builds, tests, installs and edits work anywhere the user's account can reach. Bash commands are only recorded (by the `runlog.py` hook) and listed in each run and its report. Two read-only cases remain: chat with a family member (unless you ask it to change something in a folder you name, for example “ask Ember to update C:\Projects\app\README.md”), and review of untrusted repositories, which can read but never edit or run code. Folders and files can be named as Windows (`C:\…`, `C:/…`, `\\server\share`) or POSIX (`/…`, `~/…`) paths; naming a file grants its folder. System folders, drive roots, your home folder itself, and credential folders (`.ssh`, `.aws`, `.fam`, …) are always refused.
 
 ### Skills
 
@@ -98,7 +107,7 @@ The family learns how you like work done and passes it to every member in their 
 
 ### Attachments
 
-Attach files in the web chat with the 📎 button, by dragging them onto the composer, or by pasting (screenshots work). From the terminal: `python daemon.py chat --attach notes.md --attach screen.png "what's wrong here?"`. Files are stored privately under `~/.fam/uploads` (folder 0700, files 0600, random ids) and the agent is told their paths and that their contents are data, not instructions. Allowed types: images (png, jpg, gif, webp), pdf, and UTF-8 text/code (txt, md, csv, json, log, py, js, ts, tsx, html, css, yaml, toml, sql, sh, diff, patch). The size limit is 10 MB per file (`FAM_UPLOAD_MAX`, bytes), up to 10 files per message. Uploading and previewing both require the local token.
+Attach files in the web chat with the 📎 button, by dragging them onto the composer, or by pasting (screenshots work). From the terminal: `python daemon.py chat --attach notes.md --attach screen.png "what's wrong here?"`. Files are stored privately under `~/.fam/uploads` (folder 0700, files 0600, random ids) and the agent is told their paths and that their contents are data, not instructions. Allowed types: images (png, jpg, gif, webp), pdf, and UTF-8 text/code (txt, md, csv, json, log, py, js, ts, tsx, html, css, yaml, toml, sql, sh, diff, patch). The size limit is 10 MB per file (`FAM_UPLOAD_MAX`, bytes), up to 10 files per message. Uploading requires the local token.
 
 ### Spend estimate and appearance
 

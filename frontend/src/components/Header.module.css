@@ -1,13 +1,13 @@
-.bar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3);padding:var(--s3) var(--s4);background:var(--surface);border-bottom:1px solid var(--line)}
-.brand{display:flex;align-items:center;gap:var(--s2);font-size:var(--t-lg);font-weight:600;color:var(--accent);line-height:1.25}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s3);padding:var(--s3) var(--s4);background:var(--surface);color:var(--ink);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:var(--s2);font:600 var(--t-lg)/1.25 var(--display);color:var(--accent)}
 .brand svg{flex:none}
-.connection{display:inline-flex;align-items:center;gap:var(--s2);color:var(--muted);font-size:var(--t-sm)}
-.connection::before{content:"";width:10px;height:10px;border-radius:2px;transform:rotate(45deg);background:var(--warn)}
-.connection[data-state=connected]::before{background:var(--ok)}
-.grow{flex:1}
-.repo,.action{min-height:44px;border-radius:12px;box-shadow:var(--shadow-1)}
-.repo{flex:1 1 180px;max-width:340px;min-width:0;padding:var(--s2) var(--s3);font:var(--t-sm) var(--mono)}
-.action{display:inline-flex;align-items:center;justify-content:center;padding:var(--s2) var(--s4);font:500 var(--t-sm)/1.2 var(--ui)}
+.connection{display:inline-flex;align-items:center;gap:var(--s2);color:inherit;font-size:var(--t-sm)}
+.connection::before{content:"";width:10px;height:10px;border-radius:var(--r-xs);transform:rotate(45deg);border:2px solid currentColor}
+.connection[data-state=connected]::before{background:currentColor}
+.repo,.action{min-height:44px;box-shadow:var(--shadow-1);color:var(--ink)}
+.repo{flex:1 1 180px;max-width:340px;min-width:0;font:var(--t-sm) var(--mono)}
+.action{display:inline-flex;align-items:center;justify-content:center;font:500 var(--t-sm)/1.2 var(--ui)}
+.action:focus-visible{border-color:var(--accent)}
 .action[aria-pressed=true]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--raised))}
 @media (max-width:767px){
   .repo{flex-basis:100%;max-width:none}

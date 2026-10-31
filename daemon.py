@@ -9,7 +9,7 @@ import time
 import webbrowser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parent
 HOME = Path(os.environ.get("FAM_HOME", Path.home() / ".fam")).expanduser()
@@ -17,6 +17,8 @@ PID = HOME / "daemon.pid"
 LOG = HOME / "daemon.log"
 TOKEN = HOME / "token"
 BASE = f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
+# Loopback only: a corporate HTTP_PROXY would otherwise answer for 127.0.0.1 (403).
+urlopen = build_opener(ProxyHandler({})).open
 
 
 def request(path, method="GET", data=None):
@@ -29,20 +31,43 @@ def request(path, method="GET", data=None):
         return json.loads(response.read())
 
 
+def alive(pid):
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    # os.kill(pid, 0) terminates the process on Windows, so query its exit code instead.
+    import ctypes
+
+    k32 = ctypes.windll.kernel32
+    handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    code = ctypes.c_ulong()
+    k32.GetExitCodeProcess(handle, ctypes.byref(code))
+    k32.CloseHandle(handle)
+    return code.value == 259  # STILL_ACTIVE
+
+
 def running():
-    if not PID.exists():
-        return None
     try:
         pid = int(PID.read_text().strip())
-        os.kill(pid, 0)
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
-        if str(Path(__file__).resolve()) not in command or "serve" not in command:
-            PID.unlink(missing_ok=True)
-            return None
-        return pid
     except (OSError, ValueError):
-        PID.unlink(missing_ok=True)
         return None
+    if alive(pid):
+        try:
+            if request("/api/health").get("pid") != pid:
+                raise ValueError("another process answers on the port")
+        except OSError:
+            return pid  # alive but not answering (hung or still starting): never spawn a duplicate
+        except ValueError:
+            pass
+        else:
+            return pid
+    PID.unlink(missing_ok=True)
+    return None
 
 
 def serve():
@@ -61,7 +86,7 @@ def start():
         return
     try:
         health = request("/api/health")
-    except (HTTPError, URLError, TimeoutError):
+    except OSError:
         pass
     else:
         print(f"Skipper is already running (PID {health['pid']}) at {BASE}")
@@ -85,7 +110,7 @@ def start():
     for _ in range(60):
         try:
             health = request("/api/health")
-        except (HTTPError, URLError, TimeoutError):
+        except OSError:
             if process.poll() is not None:
                 if PID.exists() and PID.read_text().strip() == str(process.pid):
                     PID.unlink()
@@ -121,7 +146,7 @@ def wait_healthy(old_pid=None, timeout: float = 180.0) -> dict:
     while time.monotonic() < deadline:
         try:
             health = request("/api/health")
-        except (HTTPError, URLError, TimeoutError, ConnectionError):
+        except OSError:
             health = None
         if health and health.get("pid") != old_pid and TOKEN.exists():
             return health
@@ -133,7 +158,7 @@ def restart():
     """Restart Skipper: through systemd when the service is installed, otherwise stop then start."""
     try:
         old = request("/api/health").get("pid")
-    except (HTTPError, URLError, TimeoutError, ConnectionError):
+    except OSError:
         old = None
     began = time.monotonic()
     if service_active():
@@ -161,7 +186,7 @@ def stop():
     for _ in range(40):
         try:
             health = request("/api/health")
-        except (HTTPError, URLError, TimeoutError):
+        except OSError:
             PID.unlink(missing_ok=True)
             print("Skipper stopped.")
             return
@@ -176,7 +201,7 @@ def stop():
 def status():
     try:
         h = request("/api/health")
-    except (HTTPError, URLError, TimeoutError) as e:
+    except OSError as e:
         print(f"Skipper is not responding: {e}")
         return
     print(f"Skipper is running at {BASE}; {h['running_tasks']} active task(s).")
@@ -191,7 +216,7 @@ def status():
 def runs(limit: int = 20) -> None:
     try:
         rows = request(f"/api/runs?limit={limit}")
-    except (HTTPError, URLError, TimeoutError) as e:
+    except OSError as e:
         print(f"Skipper is not responding: {e}")
         return
     if not rows:

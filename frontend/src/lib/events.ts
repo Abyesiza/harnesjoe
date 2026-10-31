@@ -29,9 +29,14 @@ export const words: Record<string, (d: Data) => string> = {
   Proposal: (d) => `A tool is available for review: ${d.names.join(", ")}. Say “approve <name>” if you want it.`,
   Scouted: (d) => `Ranger reviewed ${d.repo}. ${d.say || "The results are saved locally."}`,
   Focus: (d) => `The family is now focused on ${d.field}.`,
+  HumanDecision: (d) => `You ${d.accept ? "accepted" : "rejected"} task ${d.task.id}.`,
+  Artifact: (d) => `${d.by} made ${d.name}. Download it from the Files tab.`,
+  Stopped: (d) => `Task ${d.task.id} stopped: ${d.why}`,
+  TossReply: (d) => `${d.to} replied: ${d.text}`,
+  Lesson: (d) => `${d.by || "The family"} learned: ${d.text}`,
   Correction: () => "Skipper saved your guidance for future work.",
   Fallback: (d) => `${d.failed} failed (${d.reason}); retrying with ${d.to}.`,
 };
 
-export const REFRESH = ["Assigned", "ResearchRequest", "Finding", "Decision", "Applied", "ApplyPending", "Error", "Question", "HumanAnswer"];
+export const REFRESH = ["Assigned", "ResearchRequest", "Finding", "Decision", "Applied", "ApplyPending", "Error", "Question", "HumanAnswer", "Run", "Consulted", "Output", "Green", "Blocked", "Proposal", "Lesson", "HumanDecision", "Stopped", "Artifact"];
 export const ACTIVITY_TEXT = ["Proposal", "Scouted", "Lesson", "Focus"];

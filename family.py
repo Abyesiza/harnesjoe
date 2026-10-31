@@ -1,6 +1,8 @@
 import asyncio
 import contextlib
 import re
+import shlex
+import shutil
 import sys
 from collections import defaultdict
 from dataclasses import replace
@@ -32,14 +34,13 @@ from core import (
     Said,
     Searched,
     Task,
-    ToolAnswer,
     Tossed,
     Vote,
     on,
     sh,
 )
 from craft import render
-from mind import Brain, dist, enc, kl, spread
+from mind import dist, enc, kl, spread
 
 RUBRIC = (
     "Research to the recommended standard: primary sources first, two independent sources per key claim, "
@@ -61,8 +62,9 @@ def flow_of(text):
 
 
 class Lead(Node):
-    def __init__(s, bus, members, brain, root, crew=None, expert=None, linker=None, lam=0.75, tries=3, apply_accepted=False, fix_rounds=3):
+    def __init__(s, bus, members, brain, root, crew=None, expert=None, linker=None, lam=0.75, tries=3, apply_accepted=False, fix_rounds=3, dedupe=True):
         super().__init__(bus)
+        s.dedupe = dedupe
         s.members, s.brain, s.root, s.crew, s.expert, s.linker = members, brain, Path(root), crew or {}, expert, linker
         s.lam, s.tries, s.top, s.lock, s.apply_lock, s.apply_accepted = lam, tries, max(m.price for m in members.values()), asyncio.Lock(), asyncio.Lock(), apply_accepted
         s.active = defaultdict(set)
@@ -267,7 +269,7 @@ class Lead(Node):
 
     @on(Task)
     async def route(s, t):
-        if twin := s.twin(t):
+        if s.dedupe and (twin := s.twin(t)):
             s.tell(twin, "the user", f"asked again: {t.text}")
             await s.bus.emit(Said("Skipper", f"That matches task {twin}, which is already running, so I passed your wording to it instead of starting a second agent on the same work."))
             return
@@ -383,21 +385,41 @@ class Reviewer(Node):
 
 
 class Suite(Reviewer):
+    """Done is decided by commands, not opinions: the repo's regression suite, the task's own acceptance
+    command, and a veto on any edit to locked paths (tests, graders, specs)."""
+
     # The daemon's own interpreter, so the repo's dependencies (fastapi, numpy) are importable.
     cmd = (sys.executable, "-m", "pytest", "-q", "-rfE")
 
-    def __init__(s, bus, name="tests"):
+    def __init__(s, bus, name="tests", locked=()):
         super().__init__(bus, name, veto=True)
-        s.out = {}
+        s.out, s.locked = {}, tuple(locked)
 
     @staticmethod
     def failures(out):
         return {re.split(r" - ", line, maxsplit=1)[0] for line in out.splitlines() if line.startswith(("FAILED", "ERROR"))}
 
+    def commands(s, t):
+        npm = (Path(t.cwd) / "package.json").exists() and shutil.which("npm")
+        return [[npm, "test"] if npm else list(s.cmd), *([shlex.split(t.verify)] if t.verify else [])]
+
+    async def touched(s, t):
+        if not s.locked:
+            return []
+        _, out = await sh("git", "status", "--porcelain", "--untracked-files=all", cwd=t.cwd)
+        return [p for p in (line[3:].split(" -> ")[-1].strip('"') for line in out.splitlines()) if p.startswith(s.locked)]
+
     async def rc(s, o):
-        code, out = await sh(*s.cmd, cwd=o.task.cwd)
-        s.out[o.task.id] = out
-        if code not in (2, 3, 4) or not o.task.repo or o.task.repo == o.task.cwd:
+        if bad := await s.touched(o.task):
+            s.out[o.task.id] = f"Edits to locked files are not allowed. Restore them exactly with git checkout -- <file>: {', '.join(bad)}"
+            return 1
+        cmds, code, outs = s.commands(o.task), 0, []
+        for cmd in cmds:
+            c, out = await sh(*cmd, cwd=o.task.cwd)
+            outs.append(f"$ {' '.join(map(str, cmd))} (exit {c})\n{out[-4000:]}")
+            code = code or c
+        out = s.out[o.task.id] = "\n".join(outs)
+        if code not in (2, 3, 4) or cmds[0] != list(s.cmd) or not o.task.repo or o.task.repo == o.task.cwd:
             return code
         # Collection or environment errors the repo already has are not this change's fault.
         _, base = await sh(*s.cmd, cwd=o.task.repo)
@@ -544,20 +566,3 @@ class Researcher(Node):
             {"title": x["title"], "url": x["url"], "provider": x.get("provider", "")} for x in sources
         ]
         await s.bus.emit(Finding(q.question, prev, n, "settled" if settled else "converged" if calm >= s.patience else "budget", str(r.get("say", ""))[:500], q.id, refs[:10]))
-
-
-class Gate(Node):
-    deny = re.compile(r"rm -rf|git push|--force|curl[^|]*\|\s*(ba)?sh|\.env\b|id_rsa")
-
-    def __init__(s, bus, floor=0.9, path=None):
-        super().__init__(bus)
-        s.brain, s.floor = Brain(["ok"], path=path), floor
-
-    def verdict(s, text):
-        if s.deny.search(text):
-            return "deny"
-        return "allow" if s.brain.lcb(enc(text))[0] >= s.floor else "ask"
-
-    @on(ToolAnswer)
-    async def learn(s, a):
-        s.brain.update(enc(a.text), "ok", float(a.ok))
