@@ -1,0 +1,4 @@
+# /home/joel-abyesiza/.fam/work/17ef7f30
+## ancestor-of-main: yes
+## status
+## diff --stat main..HEAD

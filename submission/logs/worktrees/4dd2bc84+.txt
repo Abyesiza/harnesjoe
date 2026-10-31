@@ -1,0 +1,7 @@
+# /home/joel-abyesiza/.fam/work/4dd2bc84+
+## ancestor-of-main: yes
+## status
+ M .gitignore
+ M README.md
+?? frontend/
+## diff --stat main..HEAD

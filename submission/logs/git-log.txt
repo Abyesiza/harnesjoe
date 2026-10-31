@@ -1,0 +1,11 @@
+bb1a662 2026-10-31 08:32:30 +0300 HEAD -> main, origin/main, fam/71eeb3f8, fam/32b70565 Enhance web interface and search functionality
+e5dfbbe 2026-10-28 14:03:08 +0300 fam/c0b8d2a2 fam: starting state
+b3fefd8 2026-10-28 13:07:54 +0300 fam/a75c1f56 fam: starting state
+b8d10a2 2026-10-28 12:19:41 +0300 fam/30c76b62 fam: starting state
+ecbf31c 2026-10-28 02:03:23 +0300 fam/cf8b3eb7 fam: starting state
+d1c04fe 2026-10-28 01:44:29 +0300  Enhance Steward functionality with voting and decision-making improvements
+c597c89 2026-10-27 23:26:39 +0300 ui-v2, fam/f6f303fd, fam/807469ed, fam/72ff7402, fam/383a3617, fam/17ef7f30 feat: Add consult functionality and enhance messaging in Skipper and Steward
+b199f2e 2026-10-27 23:12:44 +0300  Refactor shell policy and logging mechanism
+620451c 2026-10-27 20:28:50 +0300 fam/4dd2bc84+ feat: Enhance attachment handling and UI improvements
+ff689c5 2026-10-25 16:02:21 +0300  Agent host session 85293358-4a2f-451c-9aa8-ebaa2d28aa64 - baseline checkpoint
+d2e9b94 2026-10-25 15:33:18 +0300 fam/7c7e1c10 Add tests for Skipper functionality, implement web search capabilities, and create a web interface

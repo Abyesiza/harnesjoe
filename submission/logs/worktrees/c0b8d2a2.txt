@@ -1,0 +1,8 @@
+# /home/joel-abyesiza/.fam/work/c0b8d2a2
+e5dfbbe 2026-10-28 14:03:08 +0300 fam: starting state
+## ancestor-of-main: no
+## status
+ M frontend/src/app/globals.css
+ M frontend/src/app/layout.tsx
+## diff --stat main..HEAD
+ 33 files changed, 1705 insertions(+), 163 deletions(-)
